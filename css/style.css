@@ -414,3 +414,7 @@ dialog .actions { margin-top: 16px; }
 .warn .toggle { margin-top: 10px; font-size: 13px; color: #ffd9d6; }
 .samples { display: flex; flex-direction: column; align-items: center; }
 .linkbtn.subtle { margin-top: 2px; font-size: 13px; color: var(--muted); text-decoration-color: rgba(255,90,80,.6); }
+
+.two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.two-col select { min-width: 0; }
+.material-note { margin-top: -6px; }

@@ -2,6 +2,8 @@ import { PrintView, FEATURE_COLORS } from './renderer.js';
 import { buildTimeline, stateAt, timeForPercent } from './timeline.js';
 import { FeatureNames, Feature } from './gcode.js';
 import { PRINTERS, AMBIENT, guessPrinter } from './printers.js';
+import { MATERIALS } from './materials.js';
+import { simulatePhysics } from './physics.js';
 import { idbGet, idbSet, idbDel, lsGet, lsSet, getCalibration, addCalibration } from './store.js';
 
 const $ = (id) => document.getElementById(id);
@@ -12,7 +14,7 @@ const SWATCHES = [
   ['Blue', '#1f6feb'], ['Purple', '#7b3fe4'], ['Pink', '#ff6fae'], ['Lavender', '#b9a3f5'],
 ];
 
-const prefs = Object.assign({ color: null, ghost: true, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true }, lsGet('printsim.prefs', {}));
+const prefs = Object.assign({ color: null, ghost: true, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true, printerView: true }, lsGet('printsim.prefs', {}));
 const savePrefs = () => lsSet('printsim.prefs', prefs);
 
 // ---------------------------------------------------------------- state
@@ -146,6 +148,10 @@ function onParsed(restore) {
     setup.nozzle = AMBIENT;
     setup.bed = AMBIENT;
   }
+  if (!restore || !restore.setup || !MATERIALS[setup.material]) setup.material = parsed.material || 'PLA';
+  if (setup.material !== parsed.material) simulatePhysics(parsed, setup.material, parsed.nozzleTemp);
+  parsed.activeMaterial = setup.material;
+  view.setCurl(MATERIALS[setup.material].curl);
   const printer = PRINTERS[setup.printerId] || PRINTERS['prusa-mini'];
   view.setBed(printer.bed.w, printer.bed.d);
   view.setData(parsed.segs, parsed.bbox);
@@ -220,7 +226,7 @@ function setMode(m) {
   if (m !== 'setup') setPlaying(false);
   if (m === 'setup') applyScrub();
   if (m === 'run') { view.setWarnTint(0); view.setPhysics(prefs.physics); }
-  if (m === 'done') { view.setHead(parsed.segs.move.length, null, false, false); view.setSimTime(1e9); view.setWarnTint(0); }
+  if (m === 'done') { view.setHead(parsed.segs.move.length, null, false, false); view.setSimTime(1e9); view.setWarnTint(0); view.setScreen({ title: 'finished', big: '100%', line1: 'Print done', line2: '', progress: 1, accent: accentHex() }); }
   if (m === 'empty') document.title = 'printsim';
   lastUi = 0;
 }
@@ -235,9 +241,54 @@ function fillSetupForm() {
     sel.appendChild(o);
   }
   sel.value = setup.printerId;
+  const ms = $('material');
+  ms.innerHTML = '';
+  for (const [k, m] of Object.entries(MATERIALS)) {
+    const o = document.createElement('option');
+    o.value = k;
+    o.textContent = k === parsed.material ? `${m.name} (from file)` : m.name;
+    ms.appendChild(o);
+  }
+  ms.value = setup.material;
+  updateMaterialNote();
   $('t-noz').value = Math.round(setup.nozzle);
   $('t-bed').value = Math.round(setup.bed);
   $('scrub').value = 1000;
+}
+
+function updateMaterialNote() {
+  if (!parsed) return;
+  const m = MATERIALS[setup.material] || MATERIALS.PLA;
+  const fan = parsed.rawSegs && parsed.rawSegs.fan;
+  let fanTxt = '';
+  if (fan && fan.length) {
+    let max = 0, on = 0;
+    for (let i = 0; i < fan.length; i++) { if (fan[i] > max) max = fan[i]; if (fan[i] > 0) on++; }
+    const maxPct = Math.round(max / 2.55);
+    fanTxt = max === 0 ? ' Part fan: off the whole print.'
+      : ` Part fan: up to ${maxPct}%${on / fan.length < 0.95 ? `, off for ${Math.round((1 - on / fan.length) * 100)}% of the print` : ''}.`;
+  }
+  const sp = parsed.support;
+  let sag = '';
+  if (sp && sp.bridges && sp.maxSag >= 0.15) sag = ` ${sp.bridges} bridge${sp.bridges > 1 ? 's' : ''} will droop, up to ${sp.maxSag.toFixed(1)} mm.`;
+  $('material-note').textContent = m.note + fanTxt + sag;
+}
+
+function applyMaterial(key) {
+  setup.material = key;
+  simulatePhysics(parsed, key, parsed.nozzleTemp);
+  parsed.activeMaterial = key;
+  view.setCurl(MATERIALS[key].curl);
+  view.setData(parsed.segs, parsed.bbox);
+  rebuildTimeline();
+  renderSupportWarning();
+  updateMaterialNote();
+  applyScrub();
+  saveSession();
+}
+
+function accentHex() {
+  return getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ff7a1a';
 }
 
 function updateSetupEstimate() {
@@ -275,6 +326,7 @@ function renderPreview() {
     view.setSimTime(-1e9);
     view.setWarnTint(prefs.physics ? 1 : 0);
     $('scrub-label').textContent = 'Full model';
+    view.setScreen({ title: 'ready', big: fmtDur(tl.total), line1: file ? file.name.replace(/\.b?gcode$/i, '').slice(0, 18) : '', line2: `${parsed.layers.z.length} layers`, progress: 0, accent: accentHex() });
     return;
   }
   const st = stateAt(parsed, tl, preview.t);
@@ -288,6 +340,7 @@ function renderPreview() {
     view.setHead(st.segHead, st.head, true, true);
   }
   $('scrub-label').textContent = `Layer ${st.layer + 1}/${st.layerCount} · ${Math.floor(st.percent)}% · ${fmtDur(preview.t - tl.startupEnd)} in`;
+  view.setScreen({ title: 'preview', big: `${Math.floor(st.percent)}%`, line1: `${prefs.speed}× timelapse`, line2: `Layer ${st.layer + 1}/${st.layerCount}`, progress: st.percent / 100, accent: accentHex() });
 }
 
 function setPlaying(on) {
@@ -504,6 +557,13 @@ function updateRunUI(t) {
 
   const pct = Math.min(100, Math.floor(st.percent));
   $('pct').textContent = pct;
+  view.setScreen({
+    title: st.startup ? 'preparing' : run.running ? 'printing' : 'paused',
+    big: st.startup ? '0%' : `${pct}%`,
+    line1: st.startup ? (st.phase || 'Preparing') : `${fmtDur(Math.max(0, tl.total - s))} left`,
+    line2: `Layer ${st.layer + 1}/${st.layerCount}`,
+    progress: st.percent / 100, accent: accentHex(),
+  });
   $('bar').style.width = `${st.percent.toFixed(2)}%`;
   $('bar').parentElement.classList.toggle('startup', st.startup);
   document.title = `${pct}% · printsim`;
@@ -643,6 +703,7 @@ function wire() {
     applyScrub();
     saveSession();
   };
+  $('material').onchange = (e) => applyMaterial(e.target.value);
   const tempChange = () => {
     const n = parseFloat($('t-noz').value), b = parseFloat($('t-bed').value);
     setup.nozzle = isFinite(n) ? Math.min(Math.max(n, 0), 350) : AMBIENT;
@@ -709,6 +770,12 @@ function wire() {
 
   $('grabber').onclick = () => $('sheet').classList.toggle('collapsed');
   $('vc-fit').onclick = () => view.fit();
+  $('vc-printer').onclick = () => {
+    prefs.printerView = !prefs.printerView;
+    savePrefs();
+    view.setPrinterView(prefs.printerView);
+    $('vc-printer').setAttribute('aria-pressed', prefs.printerView);
+  };
   $('vc-mode').onclick = () => {
     prefs.colorMode = prefs.colorMode === 'feature' ? 'filament' : 'feature';
     savePrefs();
@@ -773,6 +840,8 @@ async function init() {
   view.setColorMode(prefs.colorMode);
   view.setGhost(prefs.ghost);
   view.setPhysics(prefs.physics);
+  view.setPrinterView(prefs.printerView);
+  $('vc-printer').setAttribute('aria-pressed', prefs.printerView);
   setAccent(prefs.color || '#ff7a1a');
   wire();
   updateSpeedNote();

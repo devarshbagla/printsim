@@ -5,6 +5,8 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from '../vendor/OrbitControls.js';
+import { RoomEnvironment } from '../vendor/RoomEnvironment.js';
+import { PrinterModel } from './printer3d.js';
 
 const FEATURE_COLORS = [
   '#9aa0a6', // other
@@ -31,6 +33,8 @@ const vert = /* glsl */`
   attribute float iMeta;
   attribute float iDrop;      // how far this strand falls (0 = supported)
   attribute float iTime;      // sim time when the strand is finished
+  attribute vec2 iSag;        // bridge droop at start/end of this piece (mm)
+  uniform float uCurl;        // material: how wild fallen strands get
   uniform float uHead;
   uniform float uSimTime;
   uniform float uFallTime;    // sim seconds a fall takes (scaled with playback speed)
@@ -74,12 +78,13 @@ const vert = /* glsl */`
     if (hide) { gl_Position = vec4(0.0, 0.0, -2.0, 1.0); return; }
 
     vDoom = (uPhysics > 0.5 && iDrop > 0.0) ? 1.0 : 0.0;
+    if (uPhysics > 0.5) { s.z -= iSag.x; e.z -= iSag.y; }
     if (uPass < 0.5 && vDoom > 0.5) {
       // gravity: hangs in the air for a beat, then accelerates down
       float age = uSimTime - iTime;
       float p = clamp(age / uFallTime, 0.0, 1.0);
       float fall = p * p;
-      float amt = min(0.6 + iDrop * 0.18, 3.5) * p;
+      float amt = min(0.6 + iDrop * 0.18, 3.5) * p * uCurl;
       vec3 s0 = s, e0 = e;
       s.xy += curl(s0) * amt; e.xy += curl(e0) * amt;
       s.z -= iDrop * fall - 0.35 * p * (1.0 + sin(s0.x * 1.3 + s0.y * 0.7));
@@ -94,7 +99,7 @@ const vert = /* glsl */`
     float L = length(d);
     vec3 dn = L > 1e-5 ? d / L : vec3(1.0, 0.0, 0.0);
     vec3 mid = 0.5 * (ws + we);
-    vec3 viewDir = normalize(cameraPosition - mid);
+    vec3 viewDir = normalize(cameraPosition - (modelMatrix * vec4(mid, 1.0)).xyz);
     vec3 side = cross(dn, viewDir);
     if (length(side) < 1e-4) side = cross(dn, vec3(0.0, 1.0, 0.0));
     side = normalize(side);
@@ -109,7 +114,7 @@ const vert = /* glsl */`
     if (vDoom > 0.5 && uPass < 0.5) vColor = mix(vColor, vec3(1.0, 0.16, 0.12), uWarnTint);
     // freshly extruded plastic glows a little
     vHot = uPass < 0.5 ? uGlow * exp(-(headIdx - idx) / 25.0) : 0.0;
-    gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * (modelMatrix * vec4(p, 1.0));
   }
 `;
 
@@ -147,41 +152,6 @@ const frag = /* glsl */`
   }
 `;
 
-function makeBedTexture(w, d) {
-  const px = 8; // pixels per mm
-  const cw = Math.min(2048, Math.round(w * px)), ch = Math.min(2048, Math.round(d * px));
-  const cv = document.createElement('canvas');
-  cv.width = cw; cv.height = ch;
-  const g = cv.getContext('2d');
-  const grad = g.createLinearGradient(0, 0, cw, ch);
-  grad.addColorStop(0, '#26282d');
-  grad.addColorStop(1, '#1b1d21');
-  g.fillStyle = grad;
-  g.fillRect(0, 0, cw, ch);
-  // subtle powder-coat speckle
-  const img = g.getImageData(0, 0, cw, ch);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const n = (Math.random() - 0.5) * 10;
-    img.data[i] += n; img.data[i + 1] += n; img.data[i + 2] += n;
-  }
-  g.putImageData(img, 0, 0);
-  const sx = cw / w, sy = ch / d;
-  for (let mm = 0; mm <= Math.max(w, d); mm += 10) {
-    const major = mm % 50 === 0;
-    g.strokeStyle = major ? 'rgba(255,255,255,0.13)' : 'rgba(255,255,255,0.05)';
-    g.lineWidth = major ? 2 : 1;
-    if (mm <= w) { g.beginPath(); g.moveTo(mm * sx, 0); g.lineTo(mm * sx, ch); g.stroke(); }
-    if (mm <= d) { g.beginPath(); g.moveTo(0, ch - mm * sy); g.lineTo(cw, ch - mm * sy); g.stroke(); }
-  }
-  g.strokeStyle = 'rgba(255,255,255,0.25)';
-  g.lineWidth = 4;
-  g.strokeRect(2, 2, cw - 4, ch - 4);
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  return tex;
-}
-
 export class PrintView {
   constructor(canvas) {
     this.canvas = canvas;
@@ -213,10 +183,9 @@ export class PrintView {
       uFallTime: { value: 0.8 },
       uPhysics: { value: 1 },
       uWarnTint: { value: 0 },
+      uCurl: { value: 1 },
     };
 
-    this.bedGroup = new THREE.Group();
-    this.scene.add(this.bedGroup);
 
     // nozzle marker
     const nozzle = new THREE.Group();
@@ -247,8 +216,11 @@ export class PrintView {
     this.nozzle = nozzle;
     this.scene.add(nozzle);
 
-    this.scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x202328, 1.1));
-    const dl = new THREE.DirectionalLight(0xffffff, 1.6);
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+    this.scene.environmentIntensity = 0.55;
+    this.scene.add(new THREE.HemisphereLight(0xdfe8ff, 0x202328, 0.7));
+    const dl = new THREE.DirectionalLight(0xffffff, 1.3);
     dl.position.set(100, 250, 120);
     this.scene.add(dl);
 
@@ -258,6 +230,8 @@ export class PrintView {
     this.dirty = true;
     this.lastW = 0; this.lastH = 0;
     this.insets = { left: 0, bottom: 0 };
+    this.printerView = true;
+    this.lastHead = null;
     this.setBed(180, 180);
 
     this._loop = this._loop.bind(this);
@@ -266,27 +240,58 @@ export class PrintView {
 
   setBed(w, d) {
     this.bedW = w; this.bedD = d;
-    this.bedGroup.clear();
-    const tex = makeBedTexture(w, d);
-    const plate = new THREE.Mesh(
-      new THREE.BoxGeometry(w, 1.2, d),
-      [
-        new THREE.MeshStandardMaterial({ color: 0x15171a }),
-        new THREE.MeshStandardMaterial({ color: 0x15171a }),
-        new THREE.MeshStandardMaterial({ map: tex, roughness: 0.85, metalness: 0.1 }),
-        new THREE.MeshStandardMaterial({ color: 0x15171a }),
-        new THREE.MeshStandardMaterial({ color: 0x15171a }),
-        new THREE.MeshStandardMaterial({ color: 0x15171a }),
-      ],
-    );
-    plate.position.set(0, -0.62, 0);
-    this.bedGroup.add(plate);
+    this.center.set(w / 2, d / 2);
+    if (this.printer) {
+      this.scene.remove(this.printer.root, this.printer.gantry, this.printer.bed);
+      // keep the print meshes: they get re-parented below
+    }
+    this.printer = new PrinterModel(w, d);
+    this.scene.add(this.printer.root, this.printer.gantry, this.printer.bed);
+    if (this.mesh) this.printer.bed.add(this.mesh);
+    if (this.ghost) this.printer.bed.add(this.ghost);
+    this._applyView();
     this.dirty = true;
   }
 
+  setPrinterView(on) {
+    this.printerView = !!on;
+    this._applyView();
+    this.fit();
+  }
+
+  _applyView() {
+    const pr = this.printer;
+    if (!pr) return;
+    pr.root.visible = this.printerView;
+    pr.gantry.visible = this.printerView;
+    pr.bedCarriage.visible = this.printerView;
+    if (!this.printerView) pr.bed.position.z = 0;
+    this._pose();
+    this.dirty = true;
+  }
+
+  _pose() {
+    const pr = this.printer;
+    if (!pr) return;
+    if (!this.printerView) { this.nozzle.visible = !!(this.lastHead && this.lastHead.show); return; }
+    this.nozzle.visible = false;
+    const h = this.lastHead;
+    let hx, hy, bz, ex = false;
+    if (h && h.pos && h.show) {
+      hx = h.pos[0] - this.center.x; hy = h.pos[2]; bz = h.pos[1] - this.center.y; ex = h.extruding;
+    } else {
+      // parked: head to the right, above the print, bed centred
+      const top = this.bbox && isFinite(this.bbox.max[2]) ? this.bbox.max[2] : 0;
+      hx = this.bedW / 2 - 5; hy = Math.max(top + 25, 40); bz = 0;
+    }
+    pr.setPose(hx, hy, bz, ex);
+  }
+
+  setScreen(opts) { if (this.printer && this.printer.setScreen(opts)) this.dirty = true; }
+
   setData(segs, bbox) {
-    if (this.mesh) { this.scene.remove(this.mesh); this.mesh.geometry.dispose(); }
-    if (this.ghost) { this.scene.remove(this.ghost); this.ghost.geometry.dispose(); }
+    if (this.mesh) { this.mesh.removeFromParent(); this.mesh.geometry.dispose(); }
+    if (this.ghost) { this.ghost.removeFromParent(); this.ghost.geometry.dispose(); }
     this.segCount = segs.move.length;
     this.center.set(this.bedW / 2, this.bedD / 2);
 
@@ -294,6 +299,7 @@ export class PrintView {
     const aEnd = new THREE.InstancedBufferAttribute(segs.end, 3);
     const aMeta = new THREE.InstancedBufferAttribute(segs.meta, 1);
     const aDrop = new THREE.InstancedBufferAttribute(segs.drop || new Float32Array(segs.meta.length), 1);
+    const aSag = new THREE.InstancedBufferAttribute(segs.sag || new Float32Array(segs.meta.length * 2), 2);
     this.aTime = new THREE.InstancedBufferAttribute(new Float32Array(segs.meta.length), 1);
     this.aTime.setUsage(THREE.DynamicDrawUsage);
     const corner = new THREE.BufferAttribute(new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), 2);
@@ -308,6 +314,7 @@ export class PrintView {
       g.setAttribute('iMeta', aMeta);
       g.setAttribute('iDrop', aDrop);
       g.setAttribute('iTime', this.aTime);
+      g.setAttribute('iSag', aSag);
       g.instanceCount = this.segCount;
       const u = { ...this.uniforms, uPass: { value: pass } };
       const m = new THREE.ShaderMaterial({
@@ -321,9 +328,10 @@ export class PrintView {
     };
     this.mesh = mk(0);
     this.ghost = mk(1);
-    this.scene.add(this.mesh);
-    this.scene.add(this.ghost);
+    this.printer.bed.add(this.mesh);
+    this.printer.bed.add(this.ghost);
     this.bbox = bbox;
+    this._pose();
     this.fit();
     this.dirty = true;
   }
@@ -347,7 +355,11 @@ export class PrintView {
   fit() {
     const b = this.bbox;
     let cx = 0, cy = 0, cz = 0, r = Math.max(this.bedW, this.bedD) * 0.55;
-    if (b && isFinite(b.min[0])) {
+    if (this.printerView && this.printer) {
+      const pb = this.printer.bounds;
+      cx = (pb.min[0] + pb.max[0]) / 2; cy = (pb.min[1] + pb.max[1]) / 2 - 20; cz = (pb.min[2] + pb.max[2]) / 2;
+      r = Math.hypot(pb.max[0] - pb.min[0], pb.max[1] - pb.min[1], pb.max[2] - pb.min[2]) * (this.camera.aspect < 1 ? 0.46 : 0.38);
+    } else if (b && isFinite(b.min[0])) {
       cx = (b.min[0] + b.max[0]) / 2 - this.center.x;
       cy = (b.min[2] + b.max[2]) / 2;
       cz = -((b.min[1] + b.max[1]) / 2 - this.center.y);
@@ -372,6 +384,8 @@ export class PrintView {
     const u = this.uniforms;
     if (u.uHead.value !== segHead) { u.uHead.value = segHead; this.dirty = true; }
     if (this.mesh) this.mesh.geometry.instanceCount = Math.min(this.segCount, Math.floor(segHead) + 1);
+    this.lastHead = { pos: headPos ? headPos.slice() : null, show: !!show, extruding: !!extruding };
+    if (this.printerView) { this._pose(); this.dirty = true; return; }
     this.nozzle.visible = !!show;
     if (show && headPos) {
       const p = this.nozzle.position;
@@ -396,6 +410,7 @@ export class PrintView {
     }
   }
   setWarnTint(v) { if (this.uniforms.uWarnTint.value !== v) { this.uniforms.uWarnTint.value = v; this.dirty = true; } }
+  setCurl(v) { this.uniforms.uCurl.value = v; this.dirty = true; }
   setPhysics(on) { this.uniforms.uPhysics.value = on ? 1 : 0; this.dirty = true; }
 
   setColor(hex) { this.uniforms.uColor.value.set(hex); this.dirty = true; }

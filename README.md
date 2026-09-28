@@ -13,6 +13,8 @@ It's a simulation, not a camera. If the real print fails, printsim will happily 
 - **Filament colour** picker so the model matches what's actually on the spool. The UI accent follows it.
 - **Colour by feature** (perimeters, infill, supports...) to see *how* a print is built.
 - **Timelapse preview** before you print: play the whole thing at 10×, 50×, 200× or 1000×, or **layer by layer** like a printer camera timelapse.
+- **The printer, printing**: a MINI-layout printer model (single Z column, gantry, hotend, sliding bed with a textured sheet, live front screen, Bowden tube) that moves exactly like a bed-slinger: the bed carries your print back and forth in Y, the head runs in X, the gantry climbs in Z. Rotate, pan, zoom. Toggle it off for a close-up of just the print.
+- **Material-aware physics**: filament type is read from the file (PLA, PETG, ABS, ASA, PC, nylon, TPU, PVA) and can be overridden. PLA gets special treatment: its overhang and bridge limits follow the part-cooling fan speed at every moment of the print (from `M106`/`M107`), and printing it too hot costs you. Bridges that hold still sag a bit, more for PETG and TPU.
 - **"Forgot supports?" physics**: printsim rebuilds what's under every strand. Parts printed in mid-air get flagged before you print, and in the sim they droop, fall and pile up as spaghetti (and so does everything printed on top of them). Try the *"one that forgot its supports"* sample.
 - **Realistic timing**
   - Motion time is anchored to the slicer's own `M73` progress markers, so the % on screen matches the % on the printer.
@@ -49,7 +51,7 @@ GitHub Pages: Settings → Pages → Source: *Deploy from a branch* → `main` /
 
 ## How the support check works
 
-Walking the layers bottom-up, printsim keeps a height map of every strand that actually stayed put and checks each new strand for material right below it (allowing normal overhangs up to roughly 65-70° at 0.2 mm layers). An unsupported stretch that's anchored on both ends and roughly straight is a bridge and prints fine; short overhangs are fine; anything cantilevered, U-turning or floating falls. Fallen strands never count as support, so failures cascade upward like real spaghetti. It's a heuristic, not FEA: no false alarms on any real test print so far, but treat it as a warning, not a guarantee.
+Walking the layers bottom-up, printsim keeps a height map of every strand that actually stayed put and checks each new strand for material right below it (allowing normal overhangs up to roughly 65-70° at 0.2 mm layers). An unsupported stretch that's anchored on both ends and roughly straight is a bridge and prints fine; short overhangs are fine; anything cantilevered, U-turning or floating falls. Fallen strands never count as support, so failures cascade upward like real spaghetti. Limits depend on the filament and, for PLA, the fan speed on each strand; strands pressed against a supported neighbour in the same layer count as supported (once, so overhangs can't creep outward), and the slicer's elephant-foot compensation is accounted for on layer 2. It's a heuristic, not FEA: no false alarms on any real test print so far, but treat it as a warning, not a guarantee.
 
 ## Project layout
 
@@ -62,11 +64,13 @@ js/gcode.js           G-code parser (moves, layers, features, M73 anchors)
 js/timeline.js        time model, lookups, resync
 js/renderer.js        three.js scene, instanced tube shader
 js/printers.js        printer profiles (bed size, heating, probing)
-js/physics.js         support analysis + splitting falling strands
+js/physics.js         support analysis, bridge sag, splitting falling strands
+js/materials.js       filament profiles (PLA focus) + detection
+js/printer3d.js       the printer model and its kinematics
 js/store.js           IndexedDB session + calibration
 js/parser.worker.js   parsing off the main thread
 samples/              demo files (tools/make_sample.py, tools/make_overhang_tests.py)
-vendor/               three.js r170 (MIT)
+vendor/               three.js r170 + OrbitControls, RoomEnvironment, RoundedBoxGeometry (MIT)
 ```
 
 ## Roadmap
