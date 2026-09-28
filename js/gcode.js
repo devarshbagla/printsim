@@ -1,0 +1,503 @@
+// Fast byte-level G-code parser. Works on plain .gcode and on decoded .bgcode
+// (which may have spaces stripped, e.g. "G1X10Y20E.5").
+//
+// Produces:
+//  - a "move" timeline: every command that moves the head or takes time
+//    (heating waits, homing, bed probing, dwells, filament changes)
+//  - extrusion segments for rendering
+//  - layer table, M73 progress anchors, metadata, thumbnail
+
+export const Feature = {
+  Other: 0, ExternalPerimeter: 1, Perimeter: 2, OverhangPerimeter: 3,
+  InternalInfill: 4, SolidInfill: 5, TopSolidInfill: 6, BridgeInfill: 7,
+  GapFill: 8, SkirtBrim: 9, Support: 10, SupportInterface: 11,
+  WipeTower: 12, Ironing: 13, Custom: 14,
+};
+export const FeatureNames = [
+  'Other', 'External perimeter', 'Perimeter', 'Overhang perimeter',
+  'Internal infill', 'Solid infill', 'Top solid infill', 'Bridge infill',
+  'Gap fill', 'Skirt / brim', 'Support', 'Support interface',
+  'Wipe tower', 'Ironing', 'Custom (purge, etc.)',
+];
+
+// Event kinds on the move timeline (0 = plain motion).
+export const Ev = {
+  None: 0,
+  SetNozzle: 1, SetBed: 2,
+  WaitNozzle: 3, WaitNozzleAny: 4, WaitBed: 5, WaitBedAny: 6,
+  Home: 7, ProbeFull: 8, ProbeArea: 9, ProbeSmall: 10,
+  Dwell: 11, FilamentChange: 12, Pause: 13,
+};
+
+function featureFromText(t) {
+  const s = t.toLowerCase();
+  if (s.includes('external') || s.includes('outer') || s === 'wall-outer') return Feature.ExternalPerimeter;
+  if (s.includes('overhang')) return Feature.OverhangPerimeter;
+  if (s.includes('perimeter') || s.includes('wall')) return Feature.Perimeter;
+  if (s.includes('top')) return Feature.TopSolidInfill;
+  if (s.includes('bridge')) return Feature.BridgeInfill;
+  if (s.includes('solid') || s.includes('skin') || s.includes('bottom')) return Feature.SolidInfill;
+  if (s.includes('gap')) return Feature.GapFill;
+  if (s.includes('ironing')) return Feature.Ironing;
+  if (s.includes('interface')) return Feature.SupportInterface;
+  if (s.includes('support')) return Feature.Support;
+  if (s.includes('skirt') || s.includes('brim')) return Feature.SkirtBrim;
+  if (s.includes('wipe') || s.includes('prime')) return Feature.WipeTower;
+  if (s.includes('infill') || s.includes('fill')) return Feature.InternalInfill;
+  if (s.includes('custom')) return Feature.Custom;
+  return Feature.Other;
+}
+
+class GrowF32 {
+  constructor(n = 1 << 16) { this.a = new Float32Array(n); this.n = 0; }
+  push(v) { if (this.n >= this.a.length) this.grow(); this.a[this.n++] = v; }
+  push3(x, y, z) {
+    if (this.n + 3 > this.a.length) this.grow();
+    const a = this.a, n = this.n; a[n] = x; a[n + 1] = y; a[n + 2] = z; this.n = n + 3;
+  }
+  grow() { const b = new Float32Array(this.a.length * 2); b.set(this.a); this.a = b; }
+  done() { return this.a.slice(0, this.n); }
+}
+class GrowU32 extends GrowF32 {
+  constructor(n = 1 << 16) { super(1); this.a = new Uint32Array(n); }
+  grow() { const b = new Uint32Array(this.a.length * 2); b.set(this.a); this.a = b; }
+}
+class GrowU8 extends GrowF32 {
+  constructor(n = 1 << 16) { super(1); this.a = new Uint8Array(n); }
+  grow() { const b = new Uint8Array(this.a.length * 2); b.set(this.a); this.a = b; }
+}
+
+export function parseDuration(str) {
+  if (!str) return null;
+  let t = 0, found = false;
+  const re = /(\d+(?:\.\d+)?)\s*([dhms])/g;
+  let m;
+  while ((m = re.exec(str))) {
+    found = true;
+    const v = parseFloat(m[1]);
+    t += m[2] === 'd' ? v * 86400 : m[2] === 'h' ? v * 3600 : m[2] === 'm' ? v * 60 : v;
+  }
+  if (!found && /^\s*\d+(\.\d+)?\s*$/.test(str)) return parseFloat(str);
+  return found ? t : null;
+}
+
+function b64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+const DEFAULTS = {
+  accel: 1250, travelAccel: 1250, retractAccel: 1250,
+  maxFeed: [180, 180, 12, 80], // mm/s X Y Z E
+  maxAccel: [2500, 2500, 400, 5000],
+  jerk: 8,
+};
+
+/**
+ * @param {Uint8Array} src gcode bytes
+ * @param {object} opts { onProgress(fraction) }
+ */
+export function parseGcode(src, opts = {}) {
+  const onProgress = opts.onProgress || (() => {});
+  const len = src.length;
+
+  // --- motion state
+  let x = 0, y = 0, z = 0, e = 0;          // logical
+  let ox = 0, oy = 0, oz = 0;              // G92 offsets (physical = logical + offset)
+  let px = 0, py = 0, pz = 0;              // physical
+  let feed = 1500 / 60;                    // mm/s
+  let absXYZ = true, absE = true;
+  let accelPrint = DEFAULTS.accel, accelTravel = DEFAULTS.travelAccel, accelRetract = DEFAULTS.retractAccel;
+  const maxFeed = DEFAULTS.maxFeed.slice();
+  const maxAccel = DEFAULTS.maxAccel.slice();
+  let feature = Feature.Other;
+  let width = 0.45;
+  let layerHeight = 0.2;
+
+  // --- outputs
+  const mPos = new GrowF32(1 << 18);  // physical end position per move (x,y,z)
+  const mFeed = new GrowF32(1 << 16); // target speed mm/s (or event param)
+  const mAccel = new GrowF32(1 << 16);
+  const mLen = new GrowF32(1 << 16);  // path length (mm); for E-only moves = |dE|
+  const mKind = new GrowU8(1 << 16);  // 0 travel, 1 extrude, 2 E-only, 3 event
+  const mEvent = new GrowU8(1 << 16);
+  const mParam = new GrowF32(1 << 16);
+
+  const sStart = new GrowF32(1 << 18);
+  const sEnd = new GrowF32(1 << 18);
+  const sMeta = new GrowF32(1 << 16); // feature*4 + width
+  const sMove = new GrowU32(1 << 16);
+
+  const layerZ = [];
+  const layerSeg = [];
+  let curLayerZ = -Infinity;
+
+  const anchors = []; // {move, p, r}
+  const config = {};
+  const featuresSeen = new Set();
+  let firstExtrudeMove = -1;
+  let bbMin = [Infinity, Infinity, Infinity], bbMax = [-Infinity, -Infinity, -Infinity];
+  const obMin = [Infinity, Infinity, Infinity], obMax = [-Infinity, -Infinity, -Infinity];
+  let filamentChanges = 0;
+  let lineCount = 0;
+
+  // thumbnails in comments
+  let thumbCollect = null; // {fmt, w, h, parts: []}
+  const thumbs = [];
+
+  // params for current line
+  const pv = new Float64Array(26);
+  const ph = new Uint8Array(26);
+  const touched = [];
+
+  function pushMove(kind, lengthMm, speed, accel, ev = 0, param = 0) {
+    mPos.push3(px, py, pz);
+    mKind.push(kind);
+    mLen.push(lengthMm);
+    mFeed.push(speed);
+    mAccel.push(accel);
+    mEvent.push(ev);
+    mParam.push(param);
+    return mKind.n - 1;
+  }
+  function pushEvent(ev, param = 0) { return pushMove(3, 0, 0, 0, ev, param); }
+
+  function linearMove(nx, ny, nz, de) {
+    const dx = nx - px, dy = ny - py, dz = nz - pz;
+    const xyLen2 = dx * dx + dy * dy;
+    const len3 = Math.sqrt(xyLen2 + dz * dz);
+    if (len3 < 1e-6) {
+      if (Math.abs(de) > 1e-6) {
+        // retract / unretract
+        const sp = Math.min(feed, maxFeed[3]);
+        pushMove(2, Math.abs(de), sp, accelRetract);
+      }
+      return;
+    }
+    // speed limited per axis
+    let v = feed;
+    if (dx !== 0) v = Math.min(v, maxFeed[0] * len3 / Math.abs(dx));
+    if (dy !== 0) v = Math.min(v, maxFeed[1] * len3 / Math.abs(dy));
+    if (dz !== 0) v = Math.min(v, maxFeed[2] * len3 / Math.abs(dz));
+    const extruding = de > 1e-6 && xyLen2 > 1e-8;
+    let a = extruding ? accelPrint : accelTravel;
+    if (dx !== 0) a = Math.min(a, maxAccel[0] * len3 / Math.abs(dx));
+    if (dy !== 0) a = Math.min(a, maxAccel[1] * len3 / Math.abs(dy));
+    if (dz !== 0) a = Math.min(a, maxAccel[2] * len3 / Math.abs(dz));
+
+    const sx = px, sy = py, sz = pz;
+    px = nx; py = ny; pz = nz;
+    const mi = pushMove(extruding ? 1 : 0, len3, v, a);
+
+    if (extruding) {
+      if (firstExtrudeMove < 0) firstExtrudeMove = mi;
+      // layer detection by extrusion height
+      if (nz > curLayerZ + 0.009) {
+        curLayerZ = nz;
+        layerZ.push(nz);
+        layerSeg.push(sMove.n);
+      } else if (nz < curLayerZ - 0.5) {
+        // big drop (rare: e.g. sequential printing) -> new layer
+        curLayerZ = nz;
+        layerZ.push(nz);
+        layerSeg.push(sMove.n);
+      }
+      sStart.push3(sx, sy, sz);
+      sEnd.push3(nx, ny, nz);
+      sMeta.push(feature * 4 + Math.min(Math.max(width, 0.05), 3.9));
+      sMove.push(mi);
+      featuresSeen.add(feature);
+      if (nx < bbMin[0]) bbMin[0] = nx; if (nx > bbMax[0]) bbMax[0] = nx;
+      if (ny < bbMin[1]) bbMin[1] = ny; if (ny > bbMax[1]) bbMax[1] = ny;
+      if (nz < bbMin[2]) bbMin[2] = nz; if (nz > bbMax[2]) bbMax[2] = nz;
+      if (sx < bbMin[0]) bbMin[0] = sx; if (sx > bbMax[0]) bbMax[0] = sx;
+      if (sy < bbMin[1]) bbMin[1] = sy; if (sy > bbMax[1]) bbMax[1] = sy;
+      if (feature !== Feature.Custom) {
+        for (const [vx, vy, vz] of [[sx, sy, nz], [nx, ny, nz]]) {
+          if (vx < obMin[0]) obMin[0] = vx; if (vx > obMax[0]) obMax[0] = vx;
+          if (vy < obMin[1]) obMin[1] = vy; if (vy > obMax[1]) obMax[1] = vy;
+          if (vz < obMin[2]) obMin[2] = vz; if (vz > obMax[2]) obMax[2] = vz;
+        }
+      }
+    }
+  }
+
+  function has(c) { return ph[c.charCodeAt(0) - 65] === 1; }
+  function val(c) { return pv[c.charCodeAt(0) - 65]; }
+
+  function handleMotion(code) {
+    if (has('F')) { const f = val('F') / 60; if (f > 0) feed = f; }
+    let nx = x, ny = y, nz = z, ne = e;
+    if (has('X')) nx = absXYZ ? val('X') : x + val('X');
+    if (has('Y')) ny = absXYZ ? val('Y') : y + val('Y');
+    if (has('Z')) nz = absXYZ ? val('Z') : z + val('Z');
+    let de = 0;
+    if (has('E')) { if (absE) { de = val('E') - e; ne = val('E'); } else { de = val('E'); ne = e + de; } }
+
+    if (code === 2 || code === 3) {
+      // arc: I,J are offsets from start (logical)
+      const cx = x + (has('I') ? val('I') : 0);
+      const cy = y + (has('J') ? val('J') : 0);
+      let a0 = Math.atan2(y - cy, x - cx);
+      let a1 = Math.atan2(ny - cy, nx - cx);
+      const r = Math.hypot(x - cx, y - cy);
+      let sweep = a1 - a0;
+      if (code === 2) { if (sweep >= -1e-9) sweep -= 2 * Math.PI; }
+      else { if (sweep <= 1e-9) sweep += 2 * Math.PI; }
+      const arcLen = Math.abs(sweep) * r;
+      const n = Math.max(1, Math.min(360, Math.ceil(arcLen / 0.8)));
+      const zs = z, es = de;
+      for (let i = 1; i <= n; i++) {
+        const t = i / n;
+        const ang = a0 + sweep * t;
+        const lx = i === n ? nx : cx + r * Math.cos(ang);
+        const ly = i === n ? ny : cy + r * Math.sin(ang);
+        const lz = zs + (nz - zs) * t;
+        linearMove(lx + ox, ly + oy, lz + oz, es / n);
+      }
+    } else {
+      linearMove(nx + ox, ny + oy, nz + oz, de);
+    }
+    x = nx; y = ny; z = nz; e = ne;
+  }
+
+  function handleCommand(letter, code, sub) {
+    if (letter === 71) { // G
+      switch (code) {
+        case 0: case 1: case 2: case 3: handleMotion(code); break;
+        case 4: {
+          const secs = has('S') ? val('S') : has('P') ? val('P') / 1000 : 0;
+          if (secs > 0) pushEvent(Ev.Dwell, secs);
+          break;
+        }
+        case 28: pushEvent(Ev.Home); x = y = z = 0; px = ox; py = oy; pz = oz; break;
+        case 29: {
+          const hasArea = has('W') || has('H');
+          if (!has('P') && !has('A')) pushEvent(Ev.ProbeFull);
+          else if (has('P')) {
+            const p = val('P');
+            if (p === 1) pushEvent(hasArea ? Ev.ProbeSmall : Ev.ProbeArea);
+            else if (p === 9) pushEvent(Ev.ProbeSmall);
+          }
+          break;
+        }
+        case 90: absXYZ = true; break;
+        case 91: absXYZ = false; break;
+        case 92: {
+          if (has('X')) { ox = px - val('X'); x = val('X'); }
+          if (has('Y')) { oy = py - val('Y'); y = val('Y'); }
+          if (has('Z')) { oz = pz - val('Z'); z = val('Z'); }
+          if (has('E')) e = val('E');
+          if (!has('X') && !has('Y') && !has('Z') && !has('E')) { ox = px; oy = py; oz = pz; x = y = z = 0; e = 0; }
+          break;
+        }
+      }
+    } else if (letter === 77) { // M
+      switch (code) {
+        case 82: absE = true; break;
+        case 83: absE = false; break;
+        case 104: if (has('S')) pushEvent(Ev.SetNozzle, val('S')); break;
+        case 140: if (has('S')) pushEvent(Ev.SetBed, val('S')); break;
+        case 109:
+          if (has('R')) pushEvent(Ev.WaitNozzleAny, val('R'));
+          else if (has('S')) pushEvent(Ev.WaitNozzle, val('S'));
+          break;
+        case 190:
+          if (has('R')) pushEvent(Ev.WaitBedAny, val('R'));
+          else if (has('S')) pushEvent(Ev.WaitBed, val('S'));
+          break;
+        case 600: pushEvent(Ev.FilamentChange); filamentChanges++; break;
+        case 601: case 0: case 1: case 25: pushEvent(Ev.Pause); break;
+        case 73: {
+          const p = has('P') ? val('P') : NaN;
+          const r = has('R') ? val('R') : NaN;
+          if (!isNaN(p) || !isNaN(r)) anchors.push({ move: mKind.n, p, r });
+          break;
+        }
+        case 201:
+          if (has('X')) maxAccel[0] = val('X'); if (has('Y')) maxAccel[1] = val('Y');
+          if (has('Z')) maxAccel[2] = val('Z'); if (has('E')) maxAccel[3] = val('E');
+          break;
+        case 203:
+          if (has('X')) maxFeed[0] = val('X'); if (has('Y')) maxFeed[1] = val('Y');
+          if (has('Z')) maxFeed[2] = val('Z'); if (has('E')) maxFeed[3] = val('E');
+          break;
+        case 204:
+          if (has('S')) { accelPrint = accelTravel = val('S'); }
+          if (has('P')) accelPrint = val('P');
+          if (has('T')) accelTravel = val('T');
+          if (has('R')) accelRetract = val('R');
+          break;
+      }
+    }
+  }
+
+  function handleComment(s) {
+    // s: text after ';' (not trimmed)
+    const t = s.trimStart();
+    if (thumbCollect) {
+      if (/^thumbnail(_\w+)? end/.test(t)) {
+        const b64 = thumbCollect.parts.join('');
+        if (thumbCollect.fmt !== 'qoi') {
+          try { thumbs.push({ format: thumbCollect.fmt, width: thumbCollect.w, height: thumbCollect.h, data: b64ToBytes(b64) }); } catch (_) { /* ignore */ }
+        }
+        thumbCollect = null;
+      } else thumbCollect.parts.push(t.trim());
+      return;
+    }
+    if (t.startsWith('TYPE:')) { feature = featureFromText(t.slice(5).trim()); return; }
+    if (t.startsWith('FEATURE:')) { feature = featureFromText(t.slice(8).trim()); return; }
+    if (t.startsWith('WIDTH:')) { const w = parseFloat(t.slice(6)); if (w > 0) width = w; return; }
+    if (t.startsWith('LINE_WIDTH:')) { const w = parseFloat(t.slice(11)); if (w > 0) width = w; return; }
+    if (t.startsWith('HEIGHT:')) { const h = parseFloat(t.slice(7)); if (h > 0) layerHeight = h; return; }
+    if (t.startsWith('TIME:')) { config['__cura_time'] = t.slice(5).trim(); return; }
+    const tm = /^thumbnail(?:_(\w+))? begin (\d+)x(\d+)/.exec(t);
+    if (tm) {
+      const fmt = (tm[1] || 'png').toLowerCase();
+      thumbCollect = { fmt: fmt === 'jpg' || fmt === 'jpeg' ? 'jpg' : fmt, w: +tm[2], h: +tm[3], parts: [] };
+      return;
+    }
+    const eq = t.indexOf(' = ');
+    if (eq > 0 && eq < 80) {
+      config[t.slice(0, eq).trim()] = t.slice(eq + 3).trim();
+    }
+  }
+
+  // --- main loop over bytes
+  const td = new TextDecoder();
+  let i = 0;
+  let nextReport = 1 << 20;
+  while (i < len) {
+    // find line end
+    let end = i;
+    while (end < len && src[end] !== 10) end++;
+    lineCount++;
+    // skip leading whitespace
+    let p = i;
+    while (p < end && (src[p] === 32 || src[p] === 9)) p++;
+    if (p < end) {
+      const c0 = src[p];
+      if (c0 === 59) { // ';'
+        handleComment(td.decode(src.subarray(p + 1, end)).replace(/\r$/, ''));
+      } else {
+        const letter = c0 & 0xdf;
+        if (letter === 71 || letter === 77) {
+          // command number
+          p++;
+          let code = 0, digits = 0;
+          while (p < end && src[p] >= 48 && src[p] <= 57) { code = code * 10 + (src[p] - 48); p++; digits++; }
+          let sub = -1;
+          if (p < end && src[p] === 46) { p++; sub = 0; while (p < end && src[p] >= 48 && src[p] <= 57) { sub = sub * 10 + (src[p] - 48); p++; } }
+          if (digits > 0) {
+            // params
+            for (let k = 0; k < touched.length; k++) ph[touched[k]] = 0;
+            touched.length = 0;
+            // M117/M118 carry free text; skip their params
+            const isText = letter === 77 && (code === 117 || code === 118);
+            while (p < end && !isText) {
+              const ch = src[p];
+              if (ch === 59) break; // comment
+              const L = ch & 0xdf;
+              if (L >= 65 && L <= 90) {
+                p++;
+                // parse number
+                let neg = false;
+                if (p < end && (src[p] === 45 || src[p] === 43)) { neg = src[p] === 45; p++; }
+                let intPart = 0, frac = 0, scale = 1, any = false;
+                while (p < end && src[p] >= 48 && src[p] <= 57) { intPart = intPart * 10 + (src[p] - 48); p++; any = true; }
+                if (p < end && src[p] === 46) {
+                  p++;
+                  while (p < end && src[p] >= 48 && src[p] <= 57) { frac = frac * 10 + (src[p] - 48); scale *= 10; p++; any = true; }
+                }
+                const idx = L - 65;
+                pv[idx] = any ? (neg ? -(intPart + frac / scale) : intPart + frac / scale) : 0;
+                if (!ph[idx]) { ph[idx] = 1; touched.push(idx); }
+              } else p++;
+            }
+            handleCommand(letter, code, sub);
+          }
+        }
+        // T commands and others ignored
+      }
+    }
+    i = end + 1;
+    if (i > nextReport) { onProgress(i / len); nextReport += 1 << 20; }
+  }
+  if (thumbCollect) thumbCollect = null;
+
+  // ---- kinematic duration per move (trapezoid with simple junction model)
+  const M = mKind.n;
+  const pos = mPos.a, kind = mKind.a, L = mLen.a, V = mFeed.a, A = mAccel.a;
+  const raw = new Float32Array(M);
+  const jerk = DEFAULTS.jerk;
+  function dir(k, out) {
+    const bx = k > 0 ? pos[(k - 1) * 3] : 0, by = k > 0 ? pos[(k - 1) * 3 + 1] : 0, bz = k > 0 ? pos[(k - 1) * 3 + 2] : 0;
+    const l = L[k] || 1;
+    out[0] = (pos[k * 3] - bx) / l; out[1] = (pos[k * 3 + 1] - by) / l; out[2] = (pos[k * 3 + 2] - bz) / l;
+  }
+  const da = [0, 0, 0], db = [0, 0, 0];
+  function junction(a, b) {
+    if (a < 0 || b >= M) return 0;
+    if (kind[a] > 1 || kind[b] > 1) return Math.min(jerk, V[a] || jerk, V[b] || jerk) * 0.5;
+    dir(a, da); dir(b, db);
+    const cos = da[0] * db[0] + da[1] * db[1] + da[2] * db[2];
+    const vmin = Math.min(V[a], V[b]);
+    const f = Math.max(0, (1 + cos) / 2);
+    return Math.min(vmin, Math.max(jerk * 0.5, vmin * f * f));
+  }
+  let vin = 0;
+  for (let k = 0; k < M; k++) {
+    const kd = kind[k];
+    if (kd === 3) { raw[k] = 0; vin = 0; continue; }
+    const l = L[k], v = Math.max(V[k], 0.1), a = Math.max(A[k], 50);
+    if (kd === 2) { raw[k] = l / v + v / a; vin = 0; continue; }
+    const vout = junction(k, k + 1);
+    const vi = Math.min(vin, v), vo = Math.min(vout, v);
+    const dAcc = (v * v - vi * vi) / (2 * a);
+    const dDec = (v * v - vo * vo) / (2 * a);
+    let t;
+    if (dAcc + dDec <= l) {
+      t = (v - vi) / a + (v - vo) / a + (l - dAcc - dDec) / v;
+    } else {
+      const vp2 = (2 * a * l + vi * vi + vo * vo) / 2;
+      const vp = Math.sqrt(Math.max(vp2, 0));
+      if (vp < Math.max(vi, vo)) t = 2 * l / Math.max(vi + vo, 0.1);
+      else t = (vp - vi) / a + (vp - vo) / a;
+    }
+    raw[k] = t;
+    vin = vout;
+  }
+
+  // ---- metadata summary
+  const meta = { config };
+  const estStr = config['estimated printing time (normal mode)'] || config['estimated printing time'] || config['total estimated time'];
+  meta.slicerEstimate = parseDuration(estStr);
+  if (meta.slicerEstimate == null && config['__cura_time']) meta.slicerEstimate = parseFloat(config['__cura_time']) || null;
+
+  return {
+    moves: {
+      pos: mPos.done(), kind: mKind.done(), raw, event: mEvent.done(), param: mParam.done(),
+    },
+    segs: { start: sStart.done(), end: sEnd.done(), meta: sMeta.done(), move: sMove.done() },
+    layers: { z: Float32Array.from(layerZ), seg: Uint32Array.from(layerSeg) },
+    anchors,
+    firstExtrudeMove,
+    bbox: isFinite(obMin[0]) ? { min: obMin, max: obMax } : { min: bbMin, max: bbMax },
+    features: [...featuresSeen].sort((a, b) => a - b),
+    filamentChanges,
+    lineCount,
+    meta,
+    thumbs,
+    layerHeight,
+  };
+}
+
+export function transferList(result) {
+  const m = result.moves, s = result.segs;
+  return [m.pos.buffer, m.kind.buffer, m.raw.buffer, m.event.buffer, m.param.buffer,
+    s.start.buffer, s.end.buffer, s.meta.buffer, s.move.buffer,
+    result.layers.z.buffer, result.layers.seg.buffer,
+    ...result.thumbs.map(t => t.data.buffer)];
+}
