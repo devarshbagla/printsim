@@ -7,6 +7,8 @@
 //  - extrusion segments for rendering
 //  - layer table, M73 progress anchors, metadata, thumbnail
 
+import { hwLimitsFor } from './printers.js';
+
 export const Feature = {
   Other: 0, ExternalPerimeter: 1, Perimeter: 2, OverhangPerimeter: 3,
   InternalInfill: 4, SolidInfill: 5, TopSolidInfill: 6, BridgeInfill: 7,
@@ -88,6 +90,9 @@ function b64ToBytes(b64) {
   return out;
 }
 
+// Marlin arc settings used by Prusa Buddy firmware (Configuration_MINI_adv.h)
+const ARC = { min: 0.1, max: 2.0, perSec: 50, deviation: 0.02 };
+
 const DEFAULTS = {
   accel: 1250, travelAccel: 1250, retractAccel: 1250,
   maxFeed: [180, 180, 12, 80], // mm/s X Y Z E
@@ -138,6 +143,10 @@ export function parseGcode(src, opts = {}) {
   let curLayerZ = -Infinity;
 
   const anchors = []; // {move, p, r}
+  const silentAnchors = []; // stealth mode M73 Q/S
+  const probes = [];
+  let printArea = null;
+  const hw_ = () => opts.hwLimits || hwLimitsFor(opts.printerModel || config.printer_model);
   const config = {};
   const featuresSeen = new Set();
   let firstExtrudeMove = -1;
@@ -251,9 +260,10 @@ export function parseGcode(src, opts = {}) {
       if (code === 2) { if (sweep >= -1e-9) sweep -= 2 * Math.PI; }
       else { if (sweep <= 1e-9) sweep += 2 * Math.PI; }
       const arcLen = Math.abs(sweep) * r;
-      // split so the chord never strays more than ~0.05 mm from the true arc (invisible at 0.4 mm lines)
-      const maxAng = r > 0.02 ? Math.max(0.05, 2 * Math.acos(Math.max(-1, 1 - 0.05 / r))) : Math.PI / 2;
-      const n = Math.max(1, Math.min(360, Math.ceil(Math.abs(sweep) / maxAng)));
+      // Same segmentation as the printer's firmware (Marlin G2_G3.cpp, Prusa Buddy):
+      // segment = clamp(min(sqrt(8 r MAX_ARC_DEVIATION), F / MIN_ARC_SEGMENTS_PER_SEC), MIN, MAX)
+      const segMm = Math.min(ARC.max, Math.max(ARC.min, Math.min(Math.sqrt(8 * r * ARC.deviation), feed / ARC.perSec)));
+      const n = Math.max(1, Math.min(2000, Math.floor(arcLen / segMm + 0.8)));
       const zs = z, es = de;
       for (let i = 1; i <= n; i++) {
         const t = i / n;
@@ -280,12 +290,16 @@ export function parseGcode(src, opts = {}) {
         }
         case 28: pushEvent(Ev.Home); x = y = z = 0; px = ox; py = oy; pz = oz; break;
         case 29: {
+          // param = index into probes[] (area to probe; null = whole mesh)
           const hasArea = has('W') || has('H');
-          if (!has('P') && !has('A')) pushEvent(Ev.ProbeFull);
+          const area = hasArea ? { w: has('W') ? val('W') : 0, h: has('H') ? val('H') : 0 } : null;
+          if (!has('P') && !has('A')) { probes.push(null); pushEvent(Ev.ProbeFull, probes.length - 1); }
           else if (has('P')) {
             const p = val('P');
-            if (p === 1) pushEvent(hasArea ? Ev.ProbeSmall : Ev.ProbeArea);
-            else if (p === 9) pushEvent(Ev.ProbeSmall);
+            if (p === 1 || p === 9) {
+              probes.push(area || printArea);
+              pushEvent(hasArea || p === 9 ? Ev.ProbeSmall : Ev.ProbeArea, probes.length - 1);
+            }
           }
           break;
         }
@@ -319,21 +333,36 @@ export function parseGcode(src, opts = {}) {
         case 600: pushEvent(Ev.FilamentChange); filamentChanges++; break;
         case 601: case 0: case 1: case 25: pushEvent(Ev.Pause); break;
         case 73: {
-          const p = has('P') ? val('P') : NaN;
-          const r = has('R') ? val('R') : NaN;
+          // P/R = normal mode, Q/S = stealth (silent) mode
+          const p = has('P') ? val('P') : NaN, r = has('R') ? val('R') : NaN;
+          const q = has('Q') ? val('Q') : NaN, sm = has('S') ? val('S') : NaN;
           if (!isNaN(p) || !isNaN(r)) anchors.push({ move: mKind.n, p, r });
+          if (!isNaN(q) || !isNaN(sm)) silentAnchors.push({ move: mKind.n, p: q, r: sm });
           break;
         }
-        case 201:
-          if (has('X')) maxAccel[0] = val('X'); if (has('Y')) maxAccel[1] = val('Y');
-          if (has('Z')) maxAccel[2] = val('Z'); if (has('E')) maxAccel[3] = val('E');
+        // The printer clamps these to its hardware limits (Planner::apply_settings)
+        case 201: {
+          const hw = hw_();
+          const L = (i, v) => (hw ? Math.min(v, hw.accel[i]) : v);
+          if (has('X')) maxAccel[0] = L(0, val('X')); if (has('Y')) maxAccel[1] = L(1, val('Y'));
+          if (has('Z')) maxAccel[2] = L(2, val('Z')); if (has('E')) maxAccel[3] = L(3, val('E'));
           break;
-        case 203:
-          if (has('X')) maxFeed[0] = val('X'); if (has('Y')) maxFeed[1] = val('Y');
-          if (has('Z')) maxFeed[2] = val('Z'); if (has('E')) maxFeed[3] = val('E');
+        }
+        case 203: {
+          const hw = hw_();
+          const L = (i, v) => (hw ? Math.min(v, hw.feed[i]) : v);
+          if (has('X')) maxFeed[0] = L(0, val('X')); if (has('Y')) maxFeed[1] = L(1, val('Y'));
+          if (has('Z')) maxFeed[2] = L(2, val('Z')); if (has('E')) maxFeed[3] = L(3, val('E'));
           break;
-        case 205:
-          if (has('X')) jerkXYZ[0] = val('X'); if (has('Y')) jerkXYZ[1] = val('Y'); if (has('Z')) jerkXYZ[2] = val('Z');
+        }
+        case 205: {
+          const hw = hw_();
+          const L = (i, v) => (hw ? Math.min(v, hw.jerk[i]) : v);
+          if (has('X')) jerkXYZ[0] = L(0, val('X')); if (has('Y')) jerkXYZ[1] = L(1, val('Y')); if (has('Z')) jerkXYZ[2] = L(2, val('Z'));
+          break;
+        }
+        case 555: // print area hint, used by "G29 P1" to probe just that area
+          printArea = { x: has('X') ? val('X') : 0, y: has('Y') ? val('Y') : 0, w: has('W') ? val('W') : 0, h: has('H') ? val('H') : 0 };
           break;
         case 204:
           if (has('S')) { accelPrint = accelTravel = val('S'); }
@@ -448,47 +477,99 @@ export function parseGcode(src, opts = {}) {
     out[0] = (pos[k * 3] - bx) / l; out[1] = (pos[k * 3 + 1] - by) / l; out[2] = (pos[k * 3 + 2] - bz) / l;
   }
   const da = [0, 0, 0], db = [0, 0, 0];
-  // Classic jerk (what Prusa firmware and PrusaSlicer's estimator use):
-  // at a corner, each axis may change velocity by at most its jerk value.
+  // Classic jerk exactly as Marlin's planner does it (Prusa Buddy has
+  // CLASSIC_JERK enabled): take the lower of the two nominal speeds, then scale
+  // it until no axis changes speed by more than its jerk limit. An axis that
+  // reverses direction counts the larger of the two speeds, not their sum.
   function junction(a, b) {
     if (a < 0 || b >= M) return 0;
-    const vmin = Math.min(V[a] || 0, V[b] || 0);
-    if (kind[a] > 1 || kind[b] > 1) return Math.min(jerkXYZ[0], vmin);
+    const va = V[a] || 0, vb = V[b] || 0;
+    if (kind[a] > 1 || kind[b] > 1) return safeSpeed(kind[a] > 1 ? b : a);
     dir(a, da); dir(b, db);
-    let v = vmin;
+    const vj = Math.min(va, vb);
+    let f = 1;
     for (let ax = 0; ax < 3; ax++) {
-      const dd = Math.abs(db[ax] - da[ax]);
-      if (dd > 1e-9) v = Math.min(v, jerkXYZ[ax] / dd);
+      const vx = da[ax] * vj * f, vn = db[ax] * vj * f;
+      let j;
+      if (vx > vn) j = (vn > 0 || vx < 0) ? vx - vn : Math.max(vx, -vn);
+      else j = (vn < 0 || vx > 0) ? vn - vx : Math.max(-vx, vn);
+      if (j > jerkXYZ[ax]) f *= jerkXYZ[ax] / j;
     }
-    return Math.max(0, v);
+    return vj * f;
   }
-  let vin = 0;
+  // entry speed from standstill: each axis may jump straight to its jerk speed
+  function safeSpeed(k) {
+    if (k < 0 || k >= M || kind[k] > 1) return 0;
+    dir(k, da);
+    let v = V[k] || 0;
+    for (let ax = 0; ax < 3; ax++) { const c = Math.abs(da[ax]) * v; if (c > jerkXYZ[ax]) v *= jerkXYZ[ax] / c; }
+    return v;
+  }
+  // Look-ahead planning like Marlin: junction limits, then a backward pass
+  // (can we still brake in time?) and a forward pass (can we accelerate that
+  // much?), then a trapezoid per move. Temperature-set / fan / progress
+  // commands don't stop motion; waits, dwells, homing and probing do.
+  const ev = mEvent.a;
+  const transparent = (k) => kind[k] === 3 && (ev[k] === Ev.SetNozzle || ev[k] === Ev.SetBed);
+  const entry = new Float32Array(M);   // max entry speed
+  const exitCap = new Float32Array(M); // exit speed if the next thing is a stop
+  const next = new Int32Array(M).fill(-1);
+  let prevMotion = -1;
+  for (let k = 0; k < M; k++) {
+    if (transparent(k)) continue;
+    const kd = kind[k];
+    if (kd === 0 || kd === 1) {
+      if (prevMotion >= 0) { next[prevMotion] = k; entry[k] = junction(prevMotion, k); }
+      else entry[k] = safeSpeed(k);
+      exitCap[k] = safeSpeed(k);
+      prevMotion = k;
+    } else {
+      prevMotion = -1; // retraction, wait, homing... the head stops
+    }
+  }
+  // backward pass
+  for (let k = M - 1; k >= 0; k--) {
+    if (kind[k] > 1) continue;
+    const n = next[k];
+    const vExit = n >= 0 ? entry[n] : exitCap[k];
+    const a = Math.max(A[k], 50);
+    const lim = Math.sqrt(vExit * vExit + 2 * a * L[k]);
+    if (entry[k] > lim) entry[k] = lim;
+  }
+  // forward pass
+  for (let k = 0; k < M; k++) {
+    if (kind[k] > 1) continue;
+    const n = next[k];
+    if (n < 0) continue;
+    const a = Math.max(A[k], 50);
+    const lim = Math.sqrt(entry[k] * entry[k] + 2 * a * L[k]);
+    if (entry[n] > lim) entry[n] = lim;
+  }
   for (let k = 0; k < M; k++) {
     const kd = kind[k];
-    if (kd === 3) { raw[k] = 0; vin = 0; continue; }
+    if (kd === 3) { raw[k] = 0; continue; }
     const l = L[k], v = Math.max(V[k], 0.1), a = Math.max(A[k], 50);
-    if (kd === 2) { raw[k] = l / v + v / a; vin = 0; continue; }
-    const vout = junction(k, k + 1);
-    const vi = Math.min(vin, v), vo = Math.min(vout, v);
+    if (kd === 2) { raw[k] = l / v + v / a; continue; }
+    const n = next[k];
+    const vi = Math.min(entry[k], v), vo = Math.min(n >= 0 ? entry[n] : exitCap[k], v);
     const dAcc = (v * v - vi * vi) / (2 * a);
     const dDec = (v * v - vo * vo) / (2 * a);
     let t;
     if (dAcc + dDec <= l) {
       t = (v - vi) / a + (v - vo) / a + (l - dAcc - dDec) / v;
     } else {
-      const vp2 = (2 * a * l + vi * vi + vo * vo) / 2;
-      const vp = Math.sqrt(Math.max(vp2, 0));
-      if (vp < Math.max(vi, vo)) t = 2 * l / Math.max(vi + vo, 0.1);
-      else t = (vp - vi) / a + (vp - vo) / a;
+      const vp = Math.sqrt(Math.max((2 * a * l + vi * vi + vo * vo) / 2, 0));
+      t = (Math.max(vp, vi) - vi) / a + (Math.max(vp, vo) - vo) / a;
+      if (!(t > 0)) t = 2 * l / Math.max(vi + vo, 0.1);
     }
     raw[k] = t;
-    vin = vout;
   }
 
   // ---- metadata summary
   const meta = { config };
   const estStr = config['estimated printing time (normal mode)'] || config['estimated printing time'] || config['total estimated time'];
   meta.slicerEstimate = parseDuration(estStr);
+  meta.silentEstimate = parseDuration(config['estimated printing time (silent mode)']);
   if (meta.slicerEstimate == null && config['__cura_time']) meta.slicerEstimate = parseFloat(config['__cura_time']) || null;
 
   return {
@@ -498,6 +579,8 @@ export function parseGcode(src, opts = {}) {
     segs: { start: sStart.done(), end: sEnd.done(), meta: sMeta.done(), move: sMove.done(), fan: sFan.done() },
     layers: { z: Float32Array.from(layerZ), seg: Uint32Array.from(layerSeg) },
     anchors,
+    silentAnchors,
+    probes,
     firstExtrudeMove,
     bbox: isFinite(obMin[0]) ? { min: obMin, max: obMax } : { min: bbMin, max: bbMax },
     features: [...featuresSeen].sort((a, b) => a - b),

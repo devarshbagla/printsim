@@ -8,7 +8,7 @@
 //  3. Filament changes / pauses take zero sim time; the clock auto-pauses there.
 
 import { Ev } from './gcode.js';
-import { AMBIENT } from './printers.js';
+import { AMBIENT, probeSeconds } from './printers.js';
 
 function heatTime(T, target, h) {
   // seconds to heat from T to target with first-order model
@@ -46,6 +46,10 @@ export function buildTimeline(parsed, printer, opts = {}) {
   const { kind, raw, event, param } = parsed.moves;
   const M = kind.length;
   const factor = opts.factor || 1;
+  // Stealth (silent) mode on the printer: PrusaSlicer writes a second set of
+  // progress markers (M73 Q/S) timed for the printer's reduced limits.
+  const stealth = !!opts.stealth && parsed.silentAnchors && parsed.silentAnchors.length > 1;
+  const anchorsIn = stealth ? parsed.silentAnchors : parsed.anchors;
 
   // ---- slicer-domain time: motion + dwell (what the slicer's estimate covers)
   const sCum = new Float64Array(M + 1);
@@ -58,14 +62,14 @@ export function buildTimeline(parsed, printer, opts = {}) {
   const sTotal = sCum[M];
 
   // ---- anchors from M73 P (percent of slicer time)
-  let slicerTotal = parsed.meta.slicerEstimate;
-  const firstR = parsed.anchors.find(a => !isNaN(a.r));
+  let slicerTotal = stealth ? (parsed.meta.silentEstimate || null) : parsed.meta.slicerEstimate;
+  const firstR = anchorsIn.find(a => !isNaN(a.r));
   if (!(slicerTotal > 0) && firstR) slicerTotal = firstR.r * 60;
   if (!(slicerTotal > 0)) slicerTotal = sTotal;
 
   const pts = [{ move: 0, t: 0 }];
   let lastP = -1;
-  for (const a of parsed.anchors) {
+  for (const a of anchorsIn) {
     if (isNaN(a.p) || a.p <= lastP || a.p >= 100) continue;
     lastP = a.p;
     const t = slicerTotal * a.p / 100;
@@ -134,9 +138,13 @@ export function buildTimeline(parsed, printer, opts = {}) {
           break;
         }
         case Ev.Home: d = printer.homeSeconds; pending += d; phases.push({ move: k, label: 'Homing axes' }); break;
-        case Ev.ProbeFull: d = printer.probeFullSeconds; pending += d; phases.push({ move: k, label: 'Mesh bed leveling' }); break;
-        case Ev.ProbeArea: d = printer.probeAreaSeconds; pending += d; phases.push({ move: k, label: 'Mesh bed leveling' }); break;
-        case Ev.ProbeSmall: d = printer.probeSmallSeconds; pending += d; phases.push({ move: k, label: 'Probing near purge line' }); break;
+        case Ev.ProbeFull: case Ev.ProbeArea: case Ev.ProbeSmall: {
+          const area = parsed.probes ? parsed.probes[p] : null;
+          d = probeSeconds(printer, ev === Ev.ProbeFull ? null : area);
+          pending += d;
+          phases.push({ move: k, label: ev === Ev.ProbeSmall ? 'Probing near purge line' : 'Mesh bed leveling' });
+          break;
+        }
         case Ev.Dwell: d = p * factor; pending += d; break;
         case Ev.FilamentChange: pauses.push({ t, move: k, type: 'filament' }); break;
         case Ev.Pause: pauses.push({ t, move: k, type: 'pause' }); break;
@@ -154,7 +162,7 @@ export function buildTimeline(parsed, printer, opts = {}) {
   // Printer-style progress anchors (move -> percent), used for display + resync
   const pAnchors = [];
   let lp = -1;
-  for (const a of parsed.anchors) {
+  for (const a of anchorsIn) {
     if (isNaN(a.p) || a.p <= lp) continue;
     lp = a.p;
     // the printer's % only starts moving once real printing starts
@@ -165,7 +173,7 @@ export function buildTimeline(parsed, printer, opts = {}) {
 
   return {
     tEnd, dur, total: t, startupEnd, pauses, phases, phaseByMove, pAnchors,
-    slicerTotal, motionTotal: t - startupEnd, factor,
+    slicerTotal, motionTotal: t - startupEnd, factor, stealth,
     tStart,
   };
 }

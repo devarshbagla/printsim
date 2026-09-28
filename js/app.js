@@ -197,7 +197,7 @@ function onParsed(restore) {
 function rebuildTimeline(factorOverride) {
   const printer = PRINTERS[setup.printerId] || PRINTERS['prusa-mini'];
   const factor = factorOverride || getCalibration(printer.id).factor;
-  tl = buildTimeline(parsed, printer, { nozzleNow: setup.nozzle, bedNow: setup.bed, factor });
+  tl = buildTimeline(parsed, printer, { nozzleNow: setup.nozzle, bedNow: setup.bed, factor, stealth: !!setup.stealth });
   const sm = parsed.segs.move, times = new Float32Array(sm.length);
   const fr = parsed.segs.frac;
   for (let i = 0; i < sm.length; i++) {
@@ -251,6 +251,9 @@ function fillSetupForm() {
   }
   ms.value = setup.material;
   updateMaterialNote();
+  const hasSilent = parsed.silentAnchors && parsed.silentAnchors.length > 1;
+  show('stealth-row', hasSilent);
+  $('stealth').checked = hasSilent && !!setup.stealth;
   $('t-noz').value = Math.round(setup.nozzle);
   $('t-bed').value = Math.round(setup.bed);
   $('scrub').value = 1000;
@@ -704,6 +707,7 @@ function wire() {
     saveSession();
   };
   $('material').onchange = (e) => applyMaterial(e.target.value);
+  $('stealth').onchange = (e) => { setup.stealth = e.target.checked; rebuildTimeline(); applyScrub(); saveSession(); };
   const tempChange = () => {
     const n = parseFloat($('t-noz').value), b = parseFloat($('t-bed').value);
     setup.nozzle = isFinite(n) ? Math.min(Math.max(n, 0), 350) : AMBIENT;

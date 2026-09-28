@@ -24,6 +24,7 @@ self.onmessage = async (ev) => {
       gcode = dec.gcode; bgMeta = dec.metadata; bgThumbs = dec.thumbnails;
     }
     const result = parseGcode(gcode, {
+      printerModel: bgMeta ? bgMeta.printer.printer_model : undefined,
       onProgress: (f) => self.postMessage({ id, type: 'progress', stage: 'Reading moves', value: f }),
     });
     if (bgMeta) {
@@ -31,6 +32,8 @@ self.onmessage = async (ev) => {
       Object.assign(result.meta.config, bgMeta.slicer, bgMeta.print, bgMeta.printer, bgMeta.file);
       const est = bgMeta.print['estimated printing time (normal mode)'];
       if (est) result.meta.slicerEstimate = parseDuration(est) ?? result.meta.slicerEstimate;
+      const sil = bgMeta.print['estimated printing time (silent mode)'];
+      if (sil) result.meta.silentEstimate = parseDuration(sil) ?? result.meta.silentEstimate;
       result.thumbs.push(...bgThumbs.filter(t => t.format === 'png' || t.format === 'jpg'));
     }
     self.postMessage({ id, type: 'progress', stage: 'Checking overhangs and bridges', value: 1 });
