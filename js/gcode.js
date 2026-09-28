@@ -112,6 +112,7 @@ export function parseGcode(src, opts = {}) {
   let accelPrint = DEFAULTS.accel, accelTravel = DEFAULTS.travelAccel, accelRetract = DEFAULTS.retractAccel;
   const maxFeed = DEFAULTS.maxFeed.slice();
   const maxAccel = DEFAULTS.maxAccel.slice();
+  const jerkXYZ = [DEFAULTS.jerk, DEFAULTS.jerk, 0.4];
   let feature = Feature.Other;
   let width = 0.45;
   let layerHeight = 0.2;
@@ -247,7 +248,9 @@ export function parseGcode(src, opts = {}) {
       if (code === 2) { if (sweep >= -1e-9) sweep -= 2 * Math.PI; }
       else { if (sweep <= 1e-9) sweep += 2 * Math.PI; }
       const arcLen = Math.abs(sweep) * r;
-      const n = Math.max(1, Math.min(360, Math.ceil(arcLen / 0.8)));
+      // split so the chord never strays more than ~0.05 mm from the true arc (invisible at 0.4 mm lines)
+      const maxAng = r > 0.02 ? Math.max(0.05, 2 * Math.acos(Math.max(-1, 1 - 0.05 / r))) : Math.PI / 2;
+      const n = Math.max(1, Math.min(360, Math.ceil(Math.abs(sweep) / maxAng)));
       const zs = z, es = de;
       for (let i = 1; i <= n; i++) {
         const t = i / n;
@@ -323,6 +326,9 @@ export function parseGcode(src, opts = {}) {
         case 203:
           if (has('X')) maxFeed[0] = val('X'); if (has('Y')) maxFeed[1] = val('Y');
           if (has('Z')) maxFeed[2] = val('Z'); if (has('E')) maxFeed[3] = val('E');
+          break;
+        case 205:
+          if (has('X')) jerkXYZ[0] = val('X'); if (has('Y')) jerkXYZ[1] = val('Y'); if (has('Z')) jerkXYZ[2] = val('Z');
           break;
         case 204:
           if (has('S')) { accelPrint = accelTravel = val('S'); }
@@ -431,21 +437,25 @@ export function parseGcode(src, opts = {}) {
   const M = mKind.n;
   const pos = mPos.a, kind = mKind.a, L = mLen.a, V = mFeed.a, A = mAccel.a;
   const raw = new Float32Array(M);
-  const jerk = DEFAULTS.jerk;
   function dir(k, out) {
     const bx = k > 0 ? pos[(k - 1) * 3] : 0, by = k > 0 ? pos[(k - 1) * 3 + 1] : 0, bz = k > 0 ? pos[(k - 1) * 3 + 2] : 0;
     const l = L[k] || 1;
     out[0] = (pos[k * 3] - bx) / l; out[1] = (pos[k * 3 + 1] - by) / l; out[2] = (pos[k * 3 + 2] - bz) / l;
   }
   const da = [0, 0, 0], db = [0, 0, 0];
+  // Classic jerk (what Prusa firmware and PrusaSlicer's estimator use):
+  // at a corner, each axis may change velocity by at most its jerk value.
   function junction(a, b) {
     if (a < 0 || b >= M) return 0;
-    if (kind[a] > 1 || kind[b] > 1) return Math.min(jerk, V[a] || jerk, V[b] || jerk) * 0.5;
+    const vmin = Math.min(V[a] || 0, V[b] || 0);
+    if (kind[a] > 1 || kind[b] > 1) return Math.min(jerkXYZ[0], vmin);
     dir(a, da); dir(b, db);
-    const cos = da[0] * db[0] + da[1] * db[1] + da[2] * db[2];
-    const vmin = Math.min(V[a], V[b]);
-    const f = Math.max(0, (1 + cos) / 2);
-    return Math.min(vmin, Math.max(jerk * 0.5, vmin * f * f));
+    let v = vmin;
+    for (let ax = 0; ax < 3; ax++) {
+      const dd = Math.abs(db[ax] - da[ax]);
+      if (dd > 1e-9) v = Math.min(v, jerkXYZ[ax] / dd);
+    }
+    return Math.max(0, v);
   }
   let vin = 0;
   for (let k = 0; k < M; k++) {
