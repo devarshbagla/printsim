@@ -198,11 +198,13 @@ function rebuildTimeline(factorOverride) {
   const printer = PRINTERS[setup.printerId] || PRINTERS['prusa-mini'];
   const factor = factorOverride || getCalibration(printer.id).factor;
   tl = buildTimeline(parsed, printer, { nozzleNow: setup.nozzle, bedNow: setup.bed, factor, stealth: !!setup.stealth, speedPct: setup.speedPct || 100 });
-  const sm = parsed.segs.move, times = new Float32Array(sm.length);
-  const fr = parsed.segs.frac;
+  // sim time at which the nozzle lays down each END of every piece
+  const sm = parsed.segs.move, times = new Float32Array(sm.length * 2);
+  const f0 = parsed.segs.frac0, f1 = parsed.segs.frac;
   for (let i = 0; i < sm.length; i++) {
-    const k = sm[i];
-    times[i] = fr && fr[i] < 1 ? tl.tStart(k) + tl.dur[k] * fr[i] : tl.tEnd[k];
+    const k = sm[i], ts = tl.tStart(k), d = tl.dur[k];
+    times[i * 2] = ts + d * (f0 ? f0[i] : 0);
+    times[i * 2 + 1] = f1 ? ts + d * f1[i] : tl.tEnd[k];
   }
   view.setSegTimes(times);
   updateSetupEstimate();
@@ -594,7 +596,7 @@ function updateRunUI(t) {
     now_ = st.feature === Feature.Custom ? 'Purge line' : FeatureNames[st.feature];
     if (!st.extruding && !ended) now_ = `Travel · ${now_}`;
     const si = Math.min(Math.floor(st.segHead), parsed.segs.move.length - 1);
-    if (prefs.physics && parsed.segs.drop && parsed.segs.drop[si] > 0 && !ended) now_ = `${now_} · in mid-air!`;
+    if (prefs.physics && parsed.segs.drop && (parsed.segs.drop[si * 2] > 0 || parsed.segs.drop[si * 2 + 1] > 0) && !ended) now_ = `${now_} · in mid-air!`;
     if (ended) now_ = 'Finished';
   }
   $('st-phase').textContent = now_;

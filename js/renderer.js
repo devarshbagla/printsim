@@ -31,8 +31,9 @@ const vert = /* glsl */`
   attribute vec3 iStart;
   attribute vec3 iEnd;
   attribute float iMeta;
-  attribute float iDrop;      // how far this strand falls (0 = supported)
-  attribute float iTime;      // sim time when the strand is finished
+  attribute vec2 iDrop;       // how far each end of this piece falls (0 = held)
+  attribute vec2 iTime;       // sim time each end of this piece is extruded
+  attribute float iSeed;      // per-strand seed, so neighbouring strands fold differently
   attribute vec2 iSag;        // bridge droop at start/end of this piece (mm)
   uniform float uCurl;        // material: how wild fallen strands get
   uniform float uHead;
@@ -53,10 +54,20 @@ const vert = /* glsl */`
   varying float vHot;
   varying float vDoom;
 
-  // smooth wobble so fallen strands curl like real spaghetti but stay connected
-  vec2 curl(vec3 g) {
-    return vec2(sin(g.y * 0.83 + g.z * 2.1) + 0.6 * sin(g.x * 0.31 + g.z * 0.7),
-                sin(g.x * 0.77 + g.z * 1.9) + 0.6 * sin(g.y * 0.29 + g.z * 0.9));
+  // Smooth wobble so fallen strands curl like spaghetti. It depends only on the
+  // ORIGINAL position of a point and its strand's seed, so the shared end of two
+  // neighbouring pieces always moves identically: strands never tear apart.
+  vec2 curl(vec3 g, float seed) {
+    float a = seed * 6.2832, k = 0.7 + seed * 0.6;
+    vec2 w = vec2(sin(g.y * 0.83 * k + g.z * 2.1 + a) + 0.6 * sin(g.x * 0.31 + g.z * 0.7 + a * 1.7),
+                  sin(g.x * 0.77 * k + g.z * 1.9 - a) + 0.6 * sin(g.y * 0.29 + g.z * 0.9 + a * 2.3));
+    float c = cos(a), s = sin(a);
+    return vec2(c * w.x - s * w.y, s * w.x + c * w.y);
+  }
+  // fall of one END of a piece: hangs, accelerates, settles (zero speed at both ends)
+  float fallOf(float t0) {
+    float p = clamp((uSimTime - t0) / uFallTime, 0.0, 1.0);
+    return p * p * (3.0 - 2.0 * p);
   }
 
   vec3 toWorld(vec3 g) { return vec3(g.x - uCenter.x, g.z, -(g.y - uCenter.y)); }
@@ -77,18 +88,17 @@ const vert = /* glsl */`
     }
     if (hide) { gl_Position = vec4(0.0, 0.0, -2.0, 1.0); return; }
 
-    vDoom = (uPhysics > 0.5 && iDrop > 0.0) ? 1.0 : 0.0;
+    vDoom = (uPhysics > 0.5 && (iDrop.x > 0.0 || iDrop.y > 0.0)) ? 1.0 : 0.0;
     if (uPhysics > 0.5) { s.z -= iSag.x; e.z -= iSag.y; }
     if (uPass < 0.5 && vDoom > 0.5) {
-      // gravity: hangs in the air for a beat, then accelerates down
-      float age = uSimTime - iTime;
-      float p = clamp(age / uFallTime, 0.0, 1.0);
-      float fall = p * p;
-      float amt = min(0.6 + iDrop * 0.18, 3.5) * p * uCurl;
-      vec3 s0 = s, e0 = e;
-      s.xy += curl(s0) * amt; e.xy += curl(e0) * amt;
-      s.z -= iDrop * fall - 0.35 * p * (1.0 + sin(s0.x * 1.3 + s0.y * 0.7));
-      e.z -= iDrop * fall - 0.35 * p * (1.0 + sin(e0.x * 1.3 + e0.y * 0.7));
+      // each end falls on its own clock (the moment the nozzle laid it) by its own
+      // distance; the strand stays attached at the nozzle and at any hinge
+      vec3 s0 = iStart, e0 = iEnd;
+      float fs = fallOf(iTime.x), fe = fallOf(iTime.y);
+      s.xy += curl(s0, iSeed) * min(0.25 + iDrop.x * 0.22, 4.0) * uCurl * fs * step(0.0001, iDrop.x);
+      e.xy += curl(e0, iSeed) * min(0.25 + iDrop.y * 0.22, 4.0) * uCurl * fe * step(0.0001, iDrop.y);
+      s.z -= iDrop.x * fs;
+      e.z -= iDrop.y * fe;
     }
 
     float feat = floor(iMeta / 4.0 + 0.001);
@@ -112,8 +122,8 @@ const vert = /* glsl */`
     int fi = int(feat);
     vColor = uColorMode > 0.5 ? (vDoom > 0.5 ? vec3(1.0, 0.16, 0.12) : uPalette[fi]) : uColor;
     if (vDoom > 0.5 && uPass < 0.5) vColor = mix(vColor, vec3(1.0, 0.16, 0.12), uWarnTint);
-    // freshly extruded plastic glows a little
-    vHot = uPass < 0.5 ? uGlow * exp(-(headIdx - idx) / 25.0) : 0.0;
+    // freshly extruded plastic is a touch brighter right behind the nozzle
+    vHot = uPass < 0.5 ? uGlow * 0.4 * exp(-(headIdx - idx) / 10.0) : 0.0;
     gl_Position = projectionMatrix * viewMatrix * (modelMatrix * vec4(p, 1.0));
   }
 `;
@@ -146,7 +156,7 @@ const frag = /* glsl */`
     vec3 col = vColor * (0.22 + 0.55 * diff + 0.18 * fill + 0.22 * head);
     vec3 h = normalize(L1 + vViewDir);
     col += vec3(0.28) * pow(max(dot(n, h), 0.0), 36.0);
-    col = mix(col, vec3(1.0, 0.62, 0.3), clamp(vHot, 0.0, 0.7));
+    col = mix(col, min(vColor * 1.35 + vec3(0.08), vec3(1.0)), clamp(vHot, 0.0, 0.4));
     gl_FragColor = vec4(col, 1.0);
     #include <colorspace_fragment>
   }
@@ -298,9 +308,10 @@ export class PrintView {
     const aStart = new THREE.InstancedBufferAttribute(segs.start, 3);
     const aEnd = new THREE.InstancedBufferAttribute(segs.end, 3);
     const aMeta = new THREE.InstancedBufferAttribute(segs.meta, 1);
-    const aDrop = new THREE.InstancedBufferAttribute(segs.drop || new Float32Array(segs.meta.length), 1);
+    const aDrop = new THREE.InstancedBufferAttribute(segs.drop || new Float32Array(segs.meta.length * 2), 2);
+    const aSeed = new THREE.InstancedBufferAttribute(segs.seed || new Float32Array(segs.meta.length), 1);
     const aSag = new THREE.InstancedBufferAttribute(segs.sag || new Float32Array(segs.meta.length * 2), 2);
-    this.aTime = new THREE.InstancedBufferAttribute(new Float32Array(segs.meta.length), 1);
+    this.aTime = new THREE.InstancedBufferAttribute(new Float32Array(segs.meta.length * 2), 2);
     this.aTime.setUsage(THREE.DynamicDrawUsage);
     const corner = new THREE.BufferAttribute(new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), 2);
     const index = [0, 2, 1, 1, 2, 3];
@@ -315,6 +326,7 @@ export class PrintView {
       g.setAttribute('iDrop', aDrop);
       g.setAttribute('iTime', this.aTime);
       g.setAttribute('iSag', aSag);
+      g.setAttribute('iSeed', aSeed);
       g.instanceCount = this.segCount;
       const u = { ...this.uniforms, uPass: { value: pass } };
       const m = new THREE.ShaderMaterial({

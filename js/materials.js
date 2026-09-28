@@ -88,18 +88,25 @@ export function nozzleTemp(config) {
 }
 
 /** Limits for one strand given fan (0..1) and nozzle temp. */
-export function limitsFor(mat, fan01, temp) {
+/**
+ * Limits for one strand.
+ * fan01: part fan 0..1 on this strand; temp: nozzle temp; cool: 0.5..1 penalty
+ * for short layers (the plastic below had less time to set).
+ */
+export function limitsFor(mat, fan01, temp, cool = 1) {
   // cooling relative to this material's normal fan (more than normal doesn't help much)
   const f = Math.max(0, Math.min(1, fan01 / (mat.refFan || 1)));
   const lerp = (a) => a[1] + (a[0] - a[1]) * f;
   let hot = 1;
-  if (temp && temp > mat.hotAbove) hot = Math.max(0.6, 1 - (temp - mat.hotAbove) * mat.hotPenalty);
-  const angle = 45 + (lerp(mat.overhang) - 45) * hot;
+  if (temp && temp > mat.hotAbove) hot = Math.max(0.45, 1 - (temp - mat.hotAbove) * mat.hotPenalty);
+  const q = hot * cool; // everything that makes plastic softer when the next layer lands
+  // overheated/uncooled plastic slumps toward a 45 deg-or-worse overhang, clamped to sane range
+  const angle = Math.max(35, Math.min(75, 45 + (lerp(mat.overhang) - 45) * q - (1 - q) * 10));
   return {
     angle,
     tan: Math.tan((angle * Math.PI) / 180),
-    bridge: lerp(mat.bridge) * hot,
-    cantilever: lerp(mat.cantilever),
-    sag: lerp(mat.sag) / hot,
+    bridge: lerp(mat.bridge) * q,
+    cantilever: lerp(mat.cantilever) * q,
+    sag: lerp(mat.sag) / q,
   };
 }

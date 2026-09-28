@@ -33,6 +33,11 @@ Sources:
 | TPU "too hot" threshold | 235 °C | 245 °C (FLEX profile prints at 240) | PROF |
 | Print speed knob | not modelled | **Print speed %** setting; firmware divides remaining time by it and it persists between prints until restart | FW `marlin_server.cpp`; [forum: estimates doubled after a speed change carried over](https://forum.prusa3d.com/forum/prusaslicer/issue-between-slicer-and-printer-time-estimates/) |
 | `M220` in files | ignored | scales feedrate like the firmware | FW |
+| Falling filament: where it lands | whole move judged at its midpoint, all or nothing | judged every 0.4 mm; held, sagging and falling parts of one line are split, each end lands on whatever is under it | code review (Cursor/Grok), confirmed with `test/physics-geometry-test.mjs` |
+| Falling animation | strands rose ~0.7 mm before dropping, split pieces tore apart | no upward lift; each piece falls from its own end times, joints shared so lines bend instead of tearing | same review, confirmed on screen |
+| Bridge detection | any run with anchors at both ends (a U-turn counted as a bridge) | only near-straight runs; sparse infill gets a looser test | same review |
+| Heat and short layers | only weakened overhang angle | also weaken cantilever and bridge length; layers under ~8 s get less time to cool | same review |
+| Hinges past an edge | stamped as solid support | stamped 1.5 layers low so overhangs can't creep outward layer by layer | own test (line on a pad) |
 
 Net effect on the motion model vs PrusaSlicer (before M73 anchoring): laptop stand −0.1 %, Cessna 55 m −0.5 %, Cessna 30 m −0.5 %, cube −0.5 %, PS 2.8.1 cube 0.0 %. Previously +0.3 % to +2.6 %.
 
@@ -66,4 +71,5 @@ Net effect on the motion model vs PrusaSlicer (before M73 anchoring): laptop sta
 - **Heater warm-up curves**: sized from real wattages plus estimated heat capacities; corrected at runtime by *It's extruding now* and per-printer calibration.
 - **Homing time (~20 s)**: sensorless homing retries (`PRECISE_HOMING_TRIES 15`) and the starting Z height vary.
 - **Per-probe overhead**: probe settle time isn't in the firmware config; 0.15 s assumed.
+- **Falling physics** is a rule-based check, not a rigid-body sim: strands fall straight down with a small seeded curl and pile where they land. Good enough to show *where* and *when* a print fails.
 - **Material failure limits**: set above published quality limits; no systematic failure data exists. Real failed prints are the way to tune them.
