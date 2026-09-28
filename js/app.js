@@ -74,7 +74,17 @@ function setAccent(hex) {
 
 // ---------------------------------------------------------------- persistence
 function saveSession() {
-  idbSet('session', { mode, setup, run, savedAt: Date.now() });
+  idbSet('session', { mode, setup, run, doneText: mode === 'done' ? $('done-text').textContent : undefined, savedAt: Date.now() });
+}
+
+// Ask the browser not to evict our storage under disk pressure. Chrome grants
+// this silently for engaged / installed sites; Safari grants it for home-screen apps.
+async function requestPersistence() {
+  try {
+    if (navigator.storage && navigator.storage.persist && !(await navigator.storage.persisted())) {
+      await navigator.storage.persist();
+    }
+  } catch (e) { /* not supported: storage is best-effort */ }
 }
 
 // ---------------------------------------------------------------- parsing
@@ -112,7 +122,10 @@ async function openFile(name, bytes, restore = null) {
     parsed = result;
     file = { name, bytes };
     onParsed(restore);
-    if (!restore) idbSet('file', { name, bytes });
+    if (!restore) {
+      await idbSet('file', { name, bytes });
+      requestPersistence();
+    }
   } catch (err) {
     console.error(err);
     toast(`Couldn't read that file: ${err.message}`, 5000);
@@ -595,6 +608,7 @@ function wire() {
   });
   $('wake').onchange = (e) => setWake(e.target.checked);
   document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden' && parsed && mode !== 'empty') saveSession();
     if (document.visibilityState === 'visible') {
       lastUi = 0;
       if ($('wake').checked) setWake(true);
