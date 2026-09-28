@@ -58,6 +58,8 @@ class G:
             self._move(x, y, None, d * W * h / FIL_AREA, None)
 
     def layer(self, z, h):
+        if abs(z - 2 * LH) < 1e-6:
+            self.emit('M106 S255')  # part fan on from layer 2, like PrusaSlicer's PLA profile
         self.emit(';LAYER_CHANGE')
         self.emit(f';Z:{z:.2f}')
         self.emit(f';HEIGHT:{h}')

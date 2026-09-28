@@ -130,6 +130,8 @@ export function parseGcode(src, opts = {}) {
   const sEnd = new GrowF32(1 << 18);
   const sMeta = new GrowF32(1 << 16); // feature*4 + width
   const sMove = new GrowU32(1 << 16);
+  const sFan = new GrowU8(1 << 16);   // part-cooling fan 0-255 while extruding
+  let fan = 0;
 
   const layerZ = [];
   const layerSeg = [];
@@ -209,6 +211,7 @@ export function parseGcode(src, opts = {}) {
       sEnd.push3(nx, ny, nz);
       sMeta.push(feature * 4 + Math.min(Math.max(width, 0.05), 3.9));
       sMove.push(mi);
+      sFan.push(fan);
       featuresSeen.add(feature);
       if (nx < bbMin[0]) bbMin[0] = nx; if (nx > bbMax[0]) bbMax[0] = nx;
       if (ny < bbMin[1]) bbMin[1] = ny; if (ny > bbMax[1]) bbMax[1] = ny;
@@ -311,6 +314,8 @@ export function parseGcode(src, opts = {}) {
           if (has('R')) pushEvent(Ev.WaitBedAny, val('R'));
           else if (has('S')) pushEvent(Ev.WaitBed, val('S'));
           break;
+        case 106: fan = has('S') ? Math.max(0, Math.min(255, Math.round(val('S')))) : 255; break;
+        case 107: fan = 0; break;
         case 600: pushEvent(Ev.FilamentChange); filamentChanges++; break;
         case 601: case 0: case 1: case 25: pushEvent(Ev.Pause); break;
         case 73: {
@@ -490,7 +495,7 @@ export function parseGcode(src, opts = {}) {
     moves: {
       pos: mPos.done(), kind: mKind.done(), raw, event: mEvent.done(), param: mParam.done(),
     },
-    segs: { start: sStart.done(), end: sEnd.done(), meta: sMeta.done(), move: sMove.done() },
+    segs: { start: sStart.done(), end: sEnd.done(), meta: sMeta.done(), move: sMove.done(), fan: sFan.done() },
     layers: { z: Float32Array.from(layerZ), seg: Uint32Array.from(layerSeg) },
     anchors,
     firstExtrudeMove,
@@ -507,7 +512,7 @@ export function parseGcode(src, opts = {}) {
 export function transferList(result) {
   const m = result.moves, s = result.segs;
   return [m.pos.buffer, m.kind.buffer, m.raw.buffer, m.event.buffer, m.param.buffer,
-    s.start.buffer, s.end.buffer, s.meta.buffer, s.move.buffer,
+    s.start.buffer, s.end.buffer, s.meta.buffer, s.move.buffer, s.fan.buffer,
     result.layers.z.buffer, result.layers.seg.buffer,
     ...result.thumbs.map(t => t.data.buffer)];
 }

@@ -1,7 +1,16 @@
-// Parses a .gcode / .bgcode file off the main thread.
+// Parses a .gcode / .bgcode file off the main thread, then runs the
+// support/physics pass for the filament the file was sliced for.
 import { isBgcode, decodeBgcode } from './bgcode.js';
-import { parseGcode, parseDuration, transferList } from './gcode.js';
-import { analyzeSupport, splitFallingSegments } from './physics.js';
+import { parseGcode, parseDuration } from './gcode.js';
+import { simulatePhysics } from './physics.js';
+import { detectMaterial, nozzleTemp } from './materials.js';
+
+function buffersOf(obj, out = new Set()) {
+  if (!obj || typeof obj !== 'object') return out;
+  if (ArrayBuffer.isView(obj)) { out.add(obj.buffer); return out; }
+  for (const v of Object.values(obj)) buffersOf(v, out);
+  return out;
+}
 
 self.onmessage = async (ev) => {
   const { id, bytes } = ev.data;
@@ -24,13 +33,15 @@ self.onmessage = async (ev) => {
       if (est) result.meta.slicerEstimate = parseDuration(est) ?? result.meta.slicerEstimate;
       result.thumbs.push(...bgThumbs.filter(t => t.format === 'png' || t.format === 'jpg'));
     }
-    self.postMessage({ id, type: 'progress', stage: 'Checking for overhangs', value: 1 });
-    const { drop, summary } = analyzeSupport(result);
-    result.support = summary;
-    splitFallingSegments(result, drop);
+    self.postMessage({ id, type: 'progress', stage: 'Checking overhangs and bridges', value: 1 });
+    result.rawSegs = result.segs;
+    result.rawLayerSeg = result.layers.seg.slice();
+    result.material = detectMaterial(result.meta.config);
+    result.nozzleTemp = nozzleTemp(result.meta.config);
+    simulatePhysics(result, result.material, result.nozzleTemp);
     result.binary = binary;
     result.gcodeBytes = gcode.length;
-    self.postMessage({ id, type: 'done', result }, [...transferList(result), result.segs.drop.buffer, result.segs.frac.buffer]);
+    self.postMessage({ id, type: 'done', result }, [...buffersOf(result)]);
   } catch (err) {
     self.postMessage({ id, type: 'error', message: err && err.message ? err.message : String(err) });
   }

@@ -93,6 +93,8 @@ while z <= HEIGHT + 1e-6:
 
 for n, z in layers:
     h = FIRST_H if n == 0 else LAYER_H
+    if n == 1:
+        emit('M106 S255')  # part fan on from layer 2
     emit(';LAYER_CHANGE')
     emit(f';Z:{z:.1f}' if abs(z * 10 - round(z * 10)) < 1e-6 else f';Z:{z}')
     emit(f';HEIGHT:{h}')
