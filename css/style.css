@@ -373,3 +373,44 @@ dialog .actions { margin-top: 16px; }
 @media (max-width: 899px) {
   body[data-mode="setup"] .sheet { max-height: 58vh; }
 }
+
+/* ---------- timelapse player ---------- */
+.player { display: flex; align-items: center; gap: 12px; }
+.play {
+  flex: none; width: 40px; height: 40px; border-radius: 50%;
+  display: grid; place-items: center; cursor: pointer;
+  background: var(--accent); color: var(--accent-ink); border: 0;
+  box-shadow: 0 4px 14px color-mix(in srgb, var(--accent) 35%, transparent);
+}
+.play:active { transform: scale(.94); }
+.play .i-pause, .play.playing .i-play { display: none; }
+.play.playing .i-pause { display: block; }
+.play .i-play { margin-left: 2px; }
+.speeds { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+.seg { display: inline-flex; padding: 3px; border-radius: 12px; background: rgba(255,255,255,.06); border: 1px solid var(--line); }
+.seg button {
+  border: 0; background: none; cursor: pointer;
+  padding: 6px 10px; border-radius: 9px;
+  font: 600 13px var(--display); color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.seg button[aria-checked="true"] { background: rgba(255,255,255,.14); color: var(--text); }
+.pill {
+  border: 1px solid var(--line-2); background: none; cursor: pointer;
+  padding: 7px 12px; border-radius: 999px; font-size: 13px; font-weight: 500; color: var(--muted);
+}
+.pill[aria-pressed="true"] { color: var(--text); border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: color-mix(in srgb, var(--accent) 14%, transparent); }
+.speed-note { margin-top: 8px; }
+.sheet.collapsed .scrub { display: block; }
+.sheet.collapsed .speeds, .sheet.collapsed .speed-note, .sheet.collapsed .warn { display: none; }
+
+/* ---------- support warning ---------- */
+.warn {
+  padding: 12px 14px; border-radius: 14px;
+  background: rgba(255, 64, 52, .12);
+  border: 1px solid rgba(255, 90, 80, .45);
+  font-size: 13.5px; line-height: 1.45; color: #ffd9d6;
+}
+.warn b { display: block; color: #fff; font-size: 14.5px; margin-bottom: 3px; }
+.warn .toggle { margin-top: 10px; font-size: 13px; color: #ffd9d6; }
+.samples { display: flex; flex-direction: column; align-items: center; }
+.linkbtn.subtle { margin-top: 2px; font-size: 13px; color: var(--muted); text-decoration-color: rgba(255,90,80,.6); }

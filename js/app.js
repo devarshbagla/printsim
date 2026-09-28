@@ -12,7 +12,7 @@ const SWATCHES = [
   ['Blue', '#1f6feb'], ['Purple', '#7b3fe4'], ['Pink', '#ff6fae'], ['Lavender', '#b9a3f5'],
 ];
 
-const prefs = Object.assign({ color: null, ghost: true, colorMode: 'filament', printerId: null }, lsGet('printsim.prefs', {}));
+const prefs = Object.assign({ color: null, ghost: true, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true }, lsGet('printsim.prefs', {}));
 const savePrefs = () => lsSet('printsim.prefs', prefs);
 
 // ---------------------------------------------------------------- state
@@ -161,8 +161,8 @@ function onParsed(restore) {
   if (th) {
     thumbUrl = URL.createObjectURL(new Blob([th.data], { type: th.format === 'jpg' ? 'image/jpeg' : 'image/png' }));
     $('thumb').src = thumbUrl;
-    show('thumb', true);
-  } else show('thumb', false);
+    show('thumb-wrap', true);
+  } else show('thumb-wrap', false);
 
   $('file-name').textContent = file.name;
   const bits = [];
@@ -173,6 +173,7 @@ function onParsed(restore) {
   if (ft || g) bits.push([ft, g ? `${parseFloat(g).toFixed(g < 10 ? 1 : 0)} g` : ''].filter(Boolean).join(' '));
   if (parsed.filamentChanges) bits.push(`${parsed.filamentChanges} colour change${parsed.filamentChanges > 1 ? 's' : ''}`);
   $('file-meta').textContent = bits.join(' · ');
+  renderSupportWarning();
 
   if (restore && restore.run) {
     run = restore.run;
@@ -191,7 +192,15 @@ function rebuildTimeline(factorOverride) {
   const printer = PRINTERS[setup.printerId] || PRINTERS['prusa-mini'];
   const factor = factorOverride || getCalibration(printer.id).factor;
   tl = buildTimeline(parsed, printer, { nozzleNow: setup.nozzle, bedNow: setup.bed, factor });
+  const sm = parsed.segs.move, times = new Float32Array(sm.length);
+  const fr = parsed.segs.frac;
+  for (let i = 0; i < sm.length; i++) {
+    const k = sm[i];
+    times[i] = fr && fr[i] < 1 ? tl.tStart(k) + tl.dur[k] * fr[i] : tl.tEnd[k];
+  }
+  view.setSegTimes(times);
   updateSetupEstimate();
+  updateSpeedNote();
 }
 
 // ---------------------------------------------------------------- modes
@@ -208,8 +217,10 @@ function setMode(m) {
   view.controls.autoRotate = m === 'empty' || m === 'done';
   view.controls.autoRotateSpeed = 0.7;
   updateLegend();
+  if (m !== 'setup') setPlaying(false);
   if (m === 'setup') applyScrub();
-  if (m === 'done') view.setHead(parsed.segs.move.length, null, false, false);
+  if (m === 'run') { view.setWarnTint(0); view.setPhysics(prefs.physics); }
+  if (m === 'done') { view.setHead(parsed.segs.move.length, null, false, false); view.setSimTime(1e9); view.setWarnTint(0); }
   if (m === 'empty') document.title = 'printsim';
   lastUi = 0;
 }
@@ -244,18 +255,87 @@ function updateSetupEstimate() {
   el.textContent = txt;
 }
 
+// ---------------------------------------------------------------- timelapse preview
+const preview = { t: null, playing: false, lastWall: 0 };
+const printSpan = () => Math.max(tl.total - tl.startupEnd, 1);
+
 function applyScrub() {
   if (!parsed || !tl) return;
   const v = +$('scrub').value;
-  if (v >= 1000) {
-    view.setHead(parsed.segs.move.length, null, false, false);
+  preview.t = v >= 1000 ? null : tl.startupEnd + printSpan() * (v / 1000);
+  renderPreview();
+}
+
+function renderPreview() {
+  if (!parsed || !tl) return;
+  const S = parsed.segs.move.length;
+  if (preview.t == null) {
+    // full model, as sliced; strands that will fall are tinted red
+    view.setHead(S, null, false, false);
+    view.setSimTime(-1e9);
+    view.setWarnTint(prefs.physics ? 1 : 0);
     $('scrub-label').textContent = 'Full model';
     return;
   }
-  const t = tl.startupEnd + (tl.total - tl.startupEnd) * (v / 1000);
-  const st = stateAt(parsed, tl, t);
-  view.setHead(st.segHead, st.head, true, true);
-  $('scrub-label').textContent = `Layer ${st.layer + 1}/${st.layerCount} · ${Math.floor(st.percent)}%`;
+  const st = stateAt(parsed, tl, preview.t);
+  const speed = preview.playing ? prefs.speed : 1;
+  view.setWarnTint(0);
+  view.setSimTime(preview.t, Math.max(0.8, 0.8 * speed));
+  if (prefs.layerMode) {
+    // like a printer timelapse: one frame per finished layer, nozzle parked
+    view.setHead(parsed.layers.seg[st.layer] ?? S, null, false, false);
+  } else {
+    view.setHead(st.segHead, st.head, true, true);
+  }
+  $('scrub-label').textContent = `Layer ${st.layer + 1}/${st.layerCount} · ${Math.floor(st.percent)}% · ${fmtDur(preview.t - tl.startupEnd)} in`;
+}
+
+function setPlaying(on) {
+  if (on && (preview.t == null || preview.t >= tl.total - 0.5)) preview.t = tl.startupEnd;
+  preview.playing = on;
+  preview.lastWall = performance.now();
+  $('btn-play').classList.toggle('playing', on);
+  $('btn-play').setAttribute('aria-label', on ? 'Pause timelapse' : 'Play timelapse');
+  if (on) renderPreview();
+}
+
+function tickPreview() {
+  if (!preview.playing || mode !== 'setup') return;
+  const w = performance.now();
+  const dt = Math.min((w - preview.lastWall) / 1000, 0.25);
+  preview.lastWall = w;
+  preview.t += dt * prefs.speed;
+  if (preview.t >= tl.total) {
+    preview.t = tl.total;
+    setPlaying(false);
+  }
+  $('scrub').value = Math.min(999, Math.round(((preview.t - tl.startupEnd) / printSpan()) * 1000));
+  renderPreview();
+}
+
+function updateSpeedNote() {
+  for (const b of document.querySelectorAll('#speeds [data-speed]')) b.setAttribute('aria-checked', +b.dataset.speed === prefs.speed);
+  $('btn-layermode').setAttribute('aria-pressed', !!prefs.layerMode);
+  if (!tl) return;
+  $('speed-note').textContent = `Whole print plays in ${fmtDur(printSpan() / prefs.speed)} at ${prefs.speed}×`;
+}
+
+function renderSupportWarning() {
+  const box = $('support-warn');
+  const sp = parsed.support;
+  if (!sp || sp.failedFraction < 0.002 || sp.failedSegments < 20) { show(box, false); return; }
+  const pct = sp.failedFraction * 100;
+  const noSupports = String(parsed.meta.config.support_material ?? '').trim() === '0';
+  box.innerHTML = `<b>Heads up: this looks like it'll turn into spaghetti</b>
+    From layer ${sp.firstLayer + 1}, about ${pct < 1 ? pct.toFixed(1) : Math.round(pct)}% of the print has nothing underneath it${noSupports ? ' (supports are off in the slicer)' : ''}. Those strands will droop or fall. Add supports in your slicer, or hit play to watch it happen.
+    <label class="toggle"><input type="checkbox" id="physics" ${prefs.physics ? 'checked' : ''}> Simulate falling filament</label>`;
+  show(box, true);
+  $('physics').onchange = (e) => {
+    prefs.physics = e.target.checked;
+    savePrefs();
+    view.setPhysics(prefs.physics);
+    renderPreview();
+  };
 }
 
 function renderSwatches() {
@@ -418,6 +498,7 @@ function updateRunUI(t) {
   const s = simNow(t);
   const st = stateAt(parsed, tl, s);
   view.setHead(st.segHead, st.head, true, st.extruding && run.running);
+  view.setSimTime(s, 0.8);
   if (t - lastUi < 200) return;
   lastUi = t;
 
@@ -448,6 +529,8 @@ function updateRunUI(t) {
   if (!now_) {
     now_ = st.feature === Feature.Custom ? 'Purge line' : FeatureNames[st.feature];
     if (!st.extruding && !ended) now_ = `Travel · ${now_}`;
+    const si = Math.min(Math.floor(st.segHead), parsed.segs.move.length - 1);
+    if (prefs.physics && parsed.segs.drop && parsed.segs.drop[si] > 0 && !ended) now_ = `${now_} · in mid-air!`;
     if (ended) now_ = 'Finished';
   }
   $('st-phase').textContent = now_;
@@ -531,19 +614,22 @@ function wire() {
     if (f) await handleFile(f);
   });
 
-  $('btn-sample').onclick = async () => {
-    show('loading', true);
-    $('loading-stage').textContent = 'Downloading sample';
-    try {
-      const res = await fetch('samples/twisted-vase.gcode');
-      if (!res.ok) throw new Error(res.statusText);
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      await openFile('twisted-vase.gcode', bytes);
-    } catch (e) {
-      show('loading', false);
-      toast(`Couldn't load the sample: ${e.message}`);
-    }
-  };
+  for (const btn of document.querySelectorAll('[data-sample]')) {
+    btn.onclick = async () => {
+      const name = btn.dataset.sample;
+      show('loading', true);
+      $('loading-stage').textContent = 'Downloading sample';
+      try {
+        const res = await fetch(`samples/${name}`);
+        if (!res.ok) throw new Error(res.statusText);
+        const bytes = new Uint8Array(await res.arrayBuffer());
+        await openFile(name, bytes);
+      } catch (e) {
+        show('loading', false);
+        toast(`Couldn't load the sample: ${e.message}`);
+      }
+    };
+  }
   $('btn-new').onclick = newFile;
   $('btn-new2').onclick = newFile;
   $('btn-again').onclick = () => { run = null; rebuildTimeline(); setMode('setup'); saveSession(); };
@@ -566,7 +652,13 @@ function wire() {
   };
   $('t-noz').addEventListener('input', tempChange);
   $('t-bed').addEventListener('input', tempChange);
-  $('scrub').addEventListener('input', applyScrub);
+  $('scrub').addEventListener('input', () => { if (preview.playing) setPlaying(false); applyScrub(); });
+  $('btn-play').onclick = () => setPlaying(!preview.playing);
+  for (const b of document.querySelectorAll('#speeds [data-speed]')) {
+    b.setAttribute('role', 'radio');
+    b.onclick = () => { prefs.speed = +b.dataset.speed; savePrefs(); updateSpeedNote(); };
+  }
+  $('btn-layermode').onclick = () => { prefs.layerMode = !prefs.layerMode; savePrefs(); updateSpeedNote(); renderPreview(); };
   $('btn-start').onclick = startPrint;
 
   $('btn-pause').onclick = togglePause;
@@ -668,6 +760,7 @@ function trackInsets() {
 
 function frame() {
   trackInsets();
+  tickPreview();
   if (mode !== 'run' || !run || !tl) return;
   const t = now();
   checkAutoPause(t);
@@ -679,8 +772,10 @@ async function init() {
   view.onFrame = frame;
   view.setColorMode(prefs.colorMode);
   view.setGhost(prefs.ghost);
+  view.setPhysics(prefs.physics);
   setAccent(prefs.color || '#ff7a1a');
   wire();
+  updateSpeedNote();
   setMode('empty');
 
   const saved = await idbGet('file');

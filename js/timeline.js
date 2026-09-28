@@ -213,7 +213,11 @@ export function stateAt(parsed, tl, t) {
   const done = lowerBoundU32(parsed.segs.move, k); // segments fully before move k
   const kind = parsed.moves.kind[k];
   let segHead = done;
-  if (kind === 1) segHead = done + frac;
+  if (kind === 1) {
+    // a move may have been split into several pieces (falling strands)
+    const pieces = Math.max(1, upperBoundU32(parsed.segs.move, k) - done);
+    segHead = done + frac * pieces;
+  }
   if (tc >= tl.total) segHead = S;
 
   const segIdx = Math.min(Math.floor(segHead), S - 1);

@@ -29,7 +29,13 @@ const vert = /* glsl */`
   attribute vec3 iStart;
   attribute vec3 iEnd;
   attribute float iMeta;
+  attribute float iDrop;      // how far this strand falls (0 = supported)
+  attribute float iTime;      // sim time when the strand is finished
   uniform float uHead;
+  uniform float uSimTime;
+  uniform float uFallTime;    // sim seconds a fall takes (scaled with playback speed)
+  uniform float uPhysics;
+  uniform float uWarnTint;    // tint doomed strands red in the printed pass
   uniform float uPass;        // 0 = printed, 1 = ghost (not yet printed)
   uniform vec2 uCenter;       // bed center in gcode coords
   uniform vec3 uColor;
@@ -41,6 +47,13 @@ const vert = /* glsl */`
   varying vec3 vViewDir;
   varying vec3 vColor;
   varying float vHot;
+  varying float vDoom;
+
+  // smooth wobble so fallen strands curl like real spaghetti but stay connected
+  vec2 curl(vec3 g) {
+    return vec2(sin(g.y * 0.83 + g.z * 2.1) + 0.6 * sin(g.x * 0.31 + g.z * 0.7),
+                sin(g.x * 0.77 + g.z * 1.9) + 0.6 * sin(g.y * 0.29 + g.z * 0.9));
+  }
 
   vec3 toWorld(vec3 g) { return vec3(g.x - uCenter.x, g.z, -(g.y - uCenter.y)); }
 
@@ -59,6 +72,19 @@ const vert = /* glsl */`
       else if (idx == headIdx) s = mix(s, e, f);
     }
     if (hide) { gl_Position = vec4(0.0, 0.0, -2.0, 1.0); return; }
+
+    vDoom = (uPhysics > 0.5 && iDrop > 0.0) ? 1.0 : 0.0;
+    if (uPass < 0.5 && vDoom > 0.5) {
+      // gravity: hangs in the air for a beat, then accelerates down
+      float age = uSimTime - iTime;
+      float p = clamp(age / uFallTime, 0.0, 1.0);
+      float fall = p * p;
+      float amt = min(0.6 + iDrop * 0.18, 3.5) * p;
+      vec3 s0 = s, e0 = e;
+      s.xy += curl(s0) * amt; e.xy += curl(e0) * amt;
+      s.z -= iDrop * fall - 0.35 * p * (1.0 + sin(s0.x * 1.3 + s0.y * 0.7));
+      e.z -= iDrop * fall - 0.35 * p * (1.0 + sin(e0.x * 1.3 + e0.y * 0.7));
+    }
 
     float feat = floor(iMeta / 4.0 + 0.001);
     float width = iMeta - feat * 4.0;
@@ -79,7 +105,8 @@ const vert = /* glsl */`
     vSideDir = side;
     vViewDir = viewDir;
     int fi = int(feat);
-    vColor = uColorMode > 0.5 ? uPalette[fi] : uColor;
+    vColor = uColorMode > 0.5 ? (vDoom > 0.5 ? vec3(1.0, 0.16, 0.12) : uPalette[fi]) : uColor;
+    if (vDoom > 0.5 && uPass < 0.5) vColor = mix(vColor, vec3(1.0, 0.16, 0.12), uWarnTint);
     // freshly extruded plastic glows a little
     vHot = uPass < 0.5 ? uGlow * exp(-(headIdx - idx) / 25.0) : 0.0;
     gl_Position = projectionMatrix * viewMatrix * vec4(p, 1.0);
@@ -94,6 +121,7 @@ const frag = /* glsl */`
   varying vec3 vViewDir;
   varying vec3 vColor;
   varying float vHot;
+  varying float vDoom;
 
   void main() {
     float s = clamp(vSide, -1.0, 1.0);
@@ -101,7 +129,8 @@ const frag = /* glsl */`
     vec3 n = normalize(vSideDir * s + vViewDir * c);
     if (uPass > 0.5) {
       float a = uGhostAlpha * (0.35 + 0.65 * c);
-      gl_FragColor = vec4(mix(vColor, vec3(0.82, 0.86, 0.92), 0.72), a);
+      vec3 gc = vDoom > 0.5 ? vec3(1.0, 0.25, 0.2) : mix(vColor, vec3(0.82, 0.86, 0.92), 0.72);
+      gl_FragColor = vec4(gc, vDoom > 0.5 ? min(a * 2.2, 0.5) : a);
       return;
     }
     vec3 L1 = normalize(vec3(0.35, 0.9, 0.45));
@@ -180,6 +209,10 @@ export class PrintView {
       uPalette: { value: FEATURE_COLORS.map(c => new THREE.Color(c)) },
       uGlow: { value: 1 },
       uGhostAlpha: { value: 0.1 },
+      uSimTime: { value: 0 },
+      uFallTime: { value: 0.8 },
+      uPhysics: { value: 1 },
+      uWarnTint: { value: 0 },
     };
 
     this.bedGroup = new THREE.Group();
@@ -260,6 +293,9 @@ export class PrintView {
     const aStart = new THREE.InstancedBufferAttribute(segs.start, 3);
     const aEnd = new THREE.InstancedBufferAttribute(segs.end, 3);
     const aMeta = new THREE.InstancedBufferAttribute(segs.meta, 1);
+    const aDrop = new THREE.InstancedBufferAttribute(segs.drop || new Float32Array(segs.meta.length), 1);
+    this.aTime = new THREE.InstancedBufferAttribute(new Float32Array(segs.meta.length), 1);
+    this.aTime.setUsage(THREE.DynamicDrawUsage);
     const corner = new THREE.BufferAttribute(new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), 2);
     const index = [0, 2, 1, 1, 2, 3];
 
@@ -270,6 +306,8 @@ export class PrintView {
       g.setAttribute('iStart', aStart);
       g.setAttribute('iEnd', aEnd);
       g.setAttribute('iMeta', aMeta);
+      g.setAttribute('iDrop', aDrop);
+      g.setAttribute('iTime', this.aTime);
       g.instanceCount = this.segCount;
       const u = { ...this.uniforms, uPass: { value: pass } };
       const m = new THREE.ShaderMaterial({
@@ -343,6 +381,22 @@ export class PrintView {
       if (this.nozzleGlow.intensity !== gi) { this.nozzleGlow.intensity = gi; this.dirty = true; }
     }
   }
+
+  /** Sim time at which each segment finishes (drives the fall animation). */
+  setSegTimes(times) {
+    if (!this.aTime || times.length !== this.aTime.array.length) return;
+    this.aTime.array.set(times);
+    this.aTime.needsUpdate = true;
+    this.dirty = true;
+  }
+  setSimTime(t, fallTime = 0.8) {
+    const u = this.uniforms;
+    if (u.uSimTime.value !== t || u.uFallTime.value !== fallTime) {
+      u.uSimTime.value = t; u.uFallTime.value = fallTime; this.dirty = true;
+    }
+  }
+  setWarnTint(v) { if (this.uniforms.uWarnTint.value !== v) { this.uniforms.uWarnTint.value = v; this.dirty = true; } }
+  setPhysics(on) { this.uniforms.uPhysics.value = on ? 1 : 0; this.dirty = true; }
 
   setColor(hex) { this.uniforms.uColor.value.set(hex); this.dirty = true; }
   setColorMode(mode) { this.uniforms.uColorMode.value = mode === 'feature' ? 1 : 0; this.dirty = true; }

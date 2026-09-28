@@ -1,11 +1,11 @@
 // Network-first service worker: always tries fresh files (so updates land
 // immediately) but falls back to cache so the app opens with no signal
 // (like in a basement makerspace).
-const CACHE = 'printsim-v1';
+const CACHE = 'printsim-v2';
 const CORE = [
   './', 'index.html', 'css/style.css', 'manifest.webmanifest', 'icons/icon.svg',
   'js/app.js', 'js/renderer.js', 'js/timeline.js', 'js/gcode.js', 'js/bgcode.js',
-  'js/printers.js', 'js/store.js', 'js/parser.worker.js',
+  'js/printers.js', 'js/physics.js', 'js/store.js', 'js/parser.worker.js',
   'vendor/three.module.min.js', 'vendor/OrbitControls.js',
 ];
 self.addEventListener('install', (e) => {
