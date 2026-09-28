@@ -8,7 +8,7 @@
 //  3. Filament changes / pauses take zero sim time; the clock auto-pauses there.
 
 import { Ev } from './gcode.js';
-import { AMBIENT, probeSeconds } from './printers.js';
+import { AMBIENT, probeRun } from './printers.js';
 
 function heatTime(T, target, h) {
   // seconds to heat from T to target with first-order model
@@ -45,7 +45,10 @@ function advance(T, target, dt, h) {
 export function buildTimeline(parsed, printer, opts = {}) {
   const { kind, raw, event, param } = parsed.moves;
   const M = kind.length;
-  const factor = opts.factor || 1;
+  // Speed % set on the printer (Tune > Speed). Buddy scales its own time-to-end by
+  // 100/speed (marlin_server.cpp) and the setting carries over between prints.
+  const speedPct = opts.speedPct > 0 ? opts.speedPct : 100;
+  const factor = (opts.factor || 1) * (100 / speedPct);
   // Stealth (silent) mode on the printer: PrusaSlicer writes a second set of
   // progress markers (M73 Q/S) timed for the printer's reduced limits.
   const stealth = !!opts.stealth && parsed.silentAnchors && parsed.silentAnchors.length > 1;
@@ -55,8 +58,9 @@ export function buildTimeline(parsed, printer, opts = {}) {
   const sCum = new Float64Array(M + 1);
   for (let k = 0; k < M; k++) {
     let d = 0;
+    // PrusaSlicer's estimator only times G0-G3 moves (not G4 dwells, heating,
+    // homing or probing), so only motion belongs in the slicer-time domain
     if (kind[k] !== 3) d = raw[k];
-    else if (event[k] === Ev.Dwell) d = param[k];
     sCum[k + 1] = sCum[k] + d;
   }
   const sTotal = sCum[M];
@@ -97,6 +101,7 @@ export function buildTimeline(parsed, printer, opts = {}) {
   let tgtN = Tn, tgtB = Tb; // assume the printer is holding whatever it's at
   const hn = printer.nozzle, hb = printer.bedHeat;
   const pauses = []; // sim times where the clock auto-pauses
+  const probeState = { probed: new Set(), pos: null };
   const phases = []; // {move, label, target}
   let t = 0;
   let pending = 0; // motion time since last thermal update
@@ -139,13 +144,13 @@ export function buildTimeline(parsed, printer, opts = {}) {
         }
         case Ev.Home: d = printer.homeSeconds; pending += d; phases.push({ move: k, label: 'Homing axes' }); break;
         case Ev.ProbeFull: case Ev.ProbeArea: case Ev.ProbeSmall: {
-          const area = parsed.probes ? parsed.probes[p] : null;
-          d = probeSeconds(printer, ev === Ev.ProbeFull ? null : area);
+          const rec = parsed.probes ? parsed.probes[p] : null;
+          d = probeRun(printer, rec, probeState).seconds;
           pending += d;
           phases.push({ move: k, label: ev === Ev.ProbeSmall ? 'Probing near purge line' : 'Mesh bed leveling' });
           break;
         }
-        case Ev.Dwell: d = p * factor; pending += d; break;
+        case Ev.Dwell: d = p; pending += d; break; // real time, not scaled
         case Ev.FilamentChange: pauses.push({ t, move: k, type: 'filament' }); break;
         case Ev.Pause: pauses.push({ t, move: k, type: 'pause' }); break;
       }
@@ -173,7 +178,7 @@ export function buildTimeline(parsed, printer, opts = {}) {
 
   return {
     tEnd, dur, total: t, startupEnd, pauses, phases, phaseByMove, pAnchors,
-    slicerTotal, motionTotal: t - startupEnd, factor, stealth,
+    slicerTotal, motionTotal: t - startupEnd, factor, stealth, speedPct,
     tStart,
   };
 }

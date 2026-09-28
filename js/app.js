@@ -197,7 +197,7 @@ function onParsed(restore) {
 function rebuildTimeline(factorOverride) {
   const printer = PRINTERS[setup.printerId] || PRINTERS['prusa-mini'];
   const factor = factorOverride || getCalibration(printer.id).factor;
-  tl = buildTimeline(parsed, printer, { nozzleNow: setup.nozzle, bedNow: setup.bed, factor, stealth: !!setup.stealth });
+  tl = buildTimeline(parsed, printer, { nozzleNow: setup.nozzle, bedNow: setup.bed, factor, stealth: !!setup.stealth, speedPct: setup.speedPct || 100 });
   const sm = parsed.segs.move, times = new Float32Array(sm.length);
   const fr = parsed.segs.frac;
   for (let i = 0; i < sm.length; i++) {
@@ -254,6 +254,7 @@ function fillSetupForm() {
   const hasSilent = parsed.silentAnchors && parsed.silentAnchors.length > 1;
   show('stealth-row', hasSilent);
   $('stealth').checked = hasSilent && !!setup.stealth;
+  $('speed-pct').value = setup.speedPct || 100;
   $('t-noz').value = Math.round(setup.nozzle);
   $('t-bed').value = Math.round(setup.bed);
   $('scrub').value = 1000;
@@ -708,6 +709,22 @@ function wire() {
   };
   $('material').onchange = (e) => applyMaterial(e.target.value);
   $('stealth').onchange = (e) => { setup.stealth = e.target.checked; rebuildTimeline(); applyScrub(); saveSession(); };
+  const readSpeed = (el) => { const v = parseFloat(el.value); return v >= 10 && v <= 999 ? v : 100; };
+  $('speed-pct').addEventListener('change', (e) => { setup.speedPct = readSpeed(e.target); rebuildTimeline(); applyScrub(); saveSession(); });
+  // mid-print speed change: keep the sim at the same spot in the file, re-time the rest
+  $('run-speed').addEventListener('change', (e) => {
+    if (!run) return;
+    const t = now();
+    const st = stateAt(parsed, tl, simNow(t));
+    setup.speedPct = readSpeed(e.target);
+    rebuildTimeline(run.factor);
+    const s2 = tl.tStart(st.move) + tl.dur[st.move] * st.frac;
+    run.anchorSim = s2;
+    run.anchorWall = t;
+    saveSession();
+    lastUi = 0;
+    toast(`Printer speed ${setup.speedPct}%: remaining time updated`);
+  });
   const tempChange = () => {
     const n = parseFloat($('t-noz').value), b = parseFloat($('t-bed').value);
     setup.nozzle = isFinite(n) ? Math.min(Math.max(n, 0), 350) : AMBIENT;
@@ -736,7 +753,7 @@ function wire() {
     d.onclose = () => {
       if (d.returnValue !== 'ok') return;
       const v = parseFloat($('resync-val').value);
-      if (!(v >= 0 && v <= 100)) return;
+      if (!(v >= 1 && v <= 100)) return;
       syncTo(timeForPercent(tl, v));
       toast(`Synced to ${v}%`);
     };
@@ -745,6 +762,7 @@ function wire() {
   };
   $('btn-more').onclick = () => {
     const open = $('more').classList.contains('hidden');
+    $('run-speed').value = setup.speedPct || 100;
     show('more', open);
     $('btn-more').setAttribute('aria-expanded', open);
   };

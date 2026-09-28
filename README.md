@@ -57,18 +57,22 @@ Slicer limits are only half the story: the printer's firmware clamps whatever th
 |---|---|---|
 | Hardware caps on `M203` feedrate | 400 / 400 / 12 / 80 mm/s (stealth: 180) | `HWLIMIT_NORMAL/STEALTH_MAX_FEEDRATE`, applied in `Planner::apply_settings` |
 | Hardware caps on `M201` accel | 7000 / 7000 / 400 / 5000 mm/s² (stealth: 2500) | `HWLIMIT_*_MAX_ACCELERATION` |
-| Cornering | classic jerk, 8 / 8 / 2 / 10 mm/s (cap 10) | `CLASSIC_JERK`, `DEFAULT_*JERK`, `HWLIMIT_*_JERK` |
+| Cornering | classic jerk on X/Y/Z/E, 8 / 8 / 2 / 10 mm/s (cap 10), exact `planner.cpp` junction + safe-speed logic | `CLASSIC_JERK`, `DEFAULT_*JERK`, `HWLIMIT_*_JERK` |
 | Arc splitting (`G2`/`G3`) | `clamp(min(√(8·r·0.02), F/50), 0.1, 2.0)` mm | `G2_G3.cpp`, `MAX_ARC_DEVIATION`, `MIN_ARC_SEGMENTS_PER_SEC` |
 | Look-ahead | backward + forward pass over junction limits, trapezoid per move | Marlin planner |
-| Mesh bed leveling | UBL 6×6 over (-41,-48)…(195,226), 2 samples/point, 83 mm/s travel, Z 6 / 2 mm/s | `GRID_MAX_POINTS_*`, `MESH_MIN/MAX_*`, `MULTIPLE_PROBING`, `XY_PROBE_SPEED`, `Z_PROBE_SPEED_*` |
+| Mesh bed leveling | UBL 6×6 grid with a 1-point border → inner 4×4 = 16 points, 2 samples each, 83 mm/s travel, Z 6 / 2 mm/s; replayed point by point | `GRID_MAX_POINTS_*`, `GRID_BORDER`, `MESH_MIN/MAX_*`, `MULTIPLE_PROBING`, `ubl_G29.cpp` |
 | Homing | XY 50 mm/s, Z via probe at (147.4, 21.1), 2 mm re-bump at 1.5 mm/s | `HOMING_FEEDRATE_*`, `Z_SAFE_HOMING_*`, `HOMING_BUMP_DIVISOR` |
 | Heater settle | nozzle 1 s, bed 5 s | `TEMP_RESIDENCY_TIME`, `TEMP_BED_RESIDENCY_TIME` |
+| Heater power | hotend 40 W, bed ~105 W | Prusa parts + KB resistance specs |
+| Print speed knob | remaining time × 100 / speed %, persists between prints | `marlin_server.cpp` |
 | Slicer limits written to the file | MINI: 2000 print / 2500 travel accel, 180 mm/s; MINIIS: 4000, 400 mm/s | `machine_max_*` (`machine_limits_usage = emit_to_gcode`) |
 | Stealth-mode progress | files carry `M73 Q/S` alongside `M73 P/R` | `silent_mode = 1` |
 
 Not published anywhere: how fast the MINI's heaters warm up. Those stay estimates (first-order model in `js/printers.js`) and get corrected by the *It's extruding now* button and per-printer calibration. Z-homing time also depends on how high the nozzle was parked, so it's an average.
 
-Result: printsim's own motion estimate lands within 0.1-1.9% of PrusaSlicer's on every test file *before* it's anchored to the slicer's `M73` markers, so the in-between motion (which layer, where the head is) tracks the real planner closely. It's not accurate to the second and doesn't need to be.
+Result: printsim's own motion estimate lands within 0.5% of PrusaSlicer's on every test file *before* it's anchored to the slicer's `M73` markers, so the in-between motion (which layer, where the head is) tracks the real planner closely. It's not accurate to the second and doesn't need to be.
+
+Every claim, its source, and what got corrected along the way: [docs/VERIFICATION.md](docs/VERIFICATION.md).
 
 ## How the support check works
 

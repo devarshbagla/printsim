@@ -113,11 +113,12 @@ export function parseGcode(src, opts = {}) {
   let ox = 0, oy = 0, oz = 0;              // G92 offsets (physical = logical + offset)
   let px = 0, py = 0, pz = 0;              // physical
   let feed = 1500 / 60;                    // mm/s
+  let feedPct = 1;                         // M220 feedrate override
   let absXYZ = true, absE = true;
   let accelPrint = DEFAULTS.accel, accelTravel = DEFAULTS.travelAccel, accelRetract = DEFAULTS.retractAccel;
   const maxFeed = DEFAULTS.maxFeed.slice();
   const maxAccel = DEFAULTS.maxAccel.slice();
-  const jerkXYZ = [DEFAULTS.jerk, DEFAULTS.jerk, 0.4];
+  const jerkXYZ = [DEFAULTS.jerk, DEFAULTS.jerk, 0.4, 10]; // X Y Z E (Marlin DEFAULT_*JERK)
   let feature = Feature.Other;
   let width = 0.45;
   let layerHeight = 0.2;
@@ -130,6 +131,7 @@ export function parseGcode(src, opts = {}) {
   const mKind = new GrowU8(1 << 16);  // 0 travel, 1 extrude, 2 E-only, 3 event
   const mEvent = new GrowU8(1 << 16);
   const mParam = new GrowF32(1 << 16);
+  const mE = new GrowF32(1 << 16);    // extruder travel per move (mm, signed)
 
   const sStart = new GrowF32(1 << 18);
   const sEnd = new GrowF32(1 << 18);
@@ -164,7 +166,8 @@ export function parseGcode(src, opts = {}) {
   const ph = new Uint8Array(26);
   const touched = [];
 
-  function pushMove(kind, lengthMm, speed, accel, ev = 0, param = 0) {
+  function pushMove(kind, lengthMm, speed, accel, ev = 0, param = 0, eMm = 0) {
+    mE.push(eMm);
     mPos.push3(px, py, pz);
     mKind.push(kind);
     mLen.push(lengthMm);
@@ -184,12 +187,12 @@ export function parseGcode(src, opts = {}) {
       if (Math.abs(de) > 1e-6) {
         // retract / unretract
         const sp = Math.min(feed, maxFeed[3]);
-        pushMove(2, Math.abs(de), sp, accelRetract);
+        pushMove(2, Math.abs(de), sp, accelRetract, 0, 0, de);
       }
       return;
     }
-    // speed limited per axis
-    let v = feed;
+    // speed limited per axis (M220 scales the requested feedrate, like the firmware)
+    let v = feed * feedPct;
     if (dx !== 0) v = Math.min(v, maxFeed[0] * len3 / Math.abs(dx));
     if (dy !== 0) v = Math.min(v, maxFeed[1] * len3 / Math.abs(dy));
     if (dz !== 0) v = Math.min(v, maxFeed[2] * len3 / Math.abs(dz));
@@ -201,7 +204,7 @@ export function parseGcode(src, opts = {}) {
 
     const sx = px, sy = py, sz = pz;
     px = nx; py = ny; pz = nz;
-    const mi = pushMove(extruding ? 1 : 0, len3, v, a);
+    const mi = pushMove(extruding ? 1 : 0, len3, v, a, 0, 0, de);
 
     if (extruding) {
       if (firstExtrudeMove < 0) firstExtrudeMove = mi;
@@ -290,16 +293,22 @@ export function parseGcode(src, opts = {}) {
         }
         case 28: pushEvent(Ev.Home); x = y = z = 0; px = ox; py = oy; pz = oz; break;
         case 29: {
-          // param = index into probes[] (area to probe; null = whole mesh)
-          const hasArea = has('W') || has('H');
-          const area = hasArea ? { w: has('W') ? val('W') : 0, h: has('H') ? val('H') : 0 } : null;
-          if (!has('P') && !has('A')) { probes.push(null); pushEvent(Ev.ProbeFull, probes.length - 1); }
-          else if (has('P')) {
-            const p = val('P');
-            if (p === 1 || p === 9) {
-              probes.push(area || printArea);
-              pushEvent(hasArea || p === 9 ? Ev.ProbeSmall : Ev.ProbeArea, probes.length - 1);
-            }
+          // param = index into probes[]. Mirrors ubl_G29.cpp:
+          //  bare G29 -> "G29 P1 X0 Y0" (print area grown by one grid step)
+          //  G29 P1 [X Y W H] [C] -> explicit rect if X/Y and W/H given, else print area grown
+          //  G29 P9 -> nozzle cleaning on load-cell printers (no probing on MINI)
+          const any = has('P') || has('A') || has('X') || has('Y') || has('W') || has('H') || has('C');
+          const pa = printArea ? { x0: printArea.x, y0: printArea.y, x1: printArea.x + printArea.w, y1: printArea.y + printArea.h } : null;
+          if (!any) {
+            probes.push({ rect: pa, grow: !!pa, extend: false, accel: accelTravel });
+            pushEvent(Ev.ProbeFull, probes.length - 1);
+          } else if (has('P') && val('P') === 1) {
+            const explicit = (has('X') || has('Y')) && (has('W') || has('H'));
+            const rect = explicit
+              ? { x0: has('X') ? val('X') : 0, y0: has('Y') ? val('Y') : 0, x1: (has('X') ? val('X') : 0) + (has('W') ? val('W') : 0), y1: (has('Y') ? val('Y') : 0) + (has('H') ? val('H') : 0) }
+              : pa;
+            probes.push({ rect, grow: !explicit && !!pa, extend: has('C'), accel: accelTravel });
+            pushEvent(explicit ? Ev.ProbeSmall : Ev.ProbeArea, probes.length - 1);
           }
           break;
         }
@@ -358,9 +367,10 @@ export function parseGcode(src, opts = {}) {
         case 205: {
           const hw = hw_();
           const L = (i, v) => (hw ? Math.min(v, hw.jerk[i]) : v);
-          if (has('X')) jerkXYZ[0] = L(0, val('X')); if (has('Y')) jerkXYZ[1] = L(1, val('Y')); if (has('Z')) jerkXYZ[2] = L(2, val('Z'));
+          if (has('X')) jerkXYZ[0] = L(0, val('X')); if (has('Y')) jerkXYZ[1] = L(1, val('Y')); if (has('Z')) jerkXYZ[2] = L(2, val('Z')); if (has('E')) jerkXYZ[3] = L(3, val('E'));
           break;
         }
+        case 220: if (has('S') && val('S') > 0) feedPct = val('S') / 100; break;
         case 555: // print area hint, used by "G29 P1" to probe just that area
           printArea = { x: has('X') ? val('X') : 0, y: has('Y') ? val('Y') : 0, w: has('W') ? val('W') : 0, h: has('H') ? val('H') : 0 };
           break;
@@ -471,85 +481,91 @@ export function parseGcode(src, opts = {}) {
   const M = mKind.n;
   const pos = mPos.a, kind = mKind.a, L = mLen.a, V = mFeed.a, A = mAccel.a;
   const raw = new Float32Array(M);
-  function dir(k, out) {
+  const EM = mE.a;
+  // per-axis velocity of move k at its nominal speed (X, Y, Z, E), like Marlin's current_speed[]
+  function axisSpeeds(k, out) {
+    const v = V[k] || 0;
+    if (kind[k] === 2) { out[0] = out[1] = out[2] = 0; out[3] = Math.sign(EM[k]) * v; return; }
     const bx = k > 0 ? pos[(k - 1) * 3] : 0, by = k > 0 ? pos[(k - 1) * 3 + 1] : 0, bz = k > 0 ? pos[(k - 1) * 3 + 2] : 0;
-    const l = L[k] || 1;
-    out[0] = (pos[k * 3] - bx) / l; out[1] = (pos[k * 3 + 1] - by) / l; out[2] = (pos[k * 3 + 2] - bz) / l;
+    const l = L[k] || 1, f = v / l;
+    out[0] = (pos[k * 3] - bx) * f; out[1] = (pos[k * 3 + 1] - by) * f; out[2] = (pos[k * 3 + 2] - bz) * f; out[3] = EM[k] * f;
   }
-  const da = [0, 0, 0], db = [0, 0, 0];
-  // Classic jerk exactly as Marlin's planner does it (Prusa Buddy has
-  // CLASSIC_JERK enabled): take the lower of the two nominal speeds, then scale
-  // it until no axis changes speed by more than its jerk limit. An axis that
-  // reverses direction counts the larger of the two speeds, not their sum.
-  function junction(a, b) {
-    if (a < 0 || b >= M) return 0;
-    const va = V[a] || 0, vb = V[b] || 0;
-    if (kind[a] > 1 || kind[b] > 1) return safeSpeed(kind[a] > 1 ? b : a);
-    dir(a, da); dir(b, db);
-    const vj = Math.min(va, vb);
-    let f = 1;
-    for (let ax = 0; ax < 3; ax++) {
-      const vx = da[ax] * vj * f, vn = db[ax] * vj * f;
-      let j;
-      if (vx > vn) j = (vn > 0 || vx < 0) ? vx - vn : Math.max(vx, -vn);
-      else j = (vn < 0 || vx > 0) ? vn - vx : Math.max(-vx, vn);
-      if (j > jerkXYZ[ax]) f *= jerkXYZ[ax] / j;
-    }
-    return vj * f;
-  }
-  // entry speed from standstill: each axis may jump straight to its jerk speed
+  const da = [0, 0, 0, 0], db = [0, 0, 0, 0];
+  // Marlin/Prusa classic jerk (planner.cpp, "Adapted from Prusa MK3 firmware").
+  // safe speed: the speed this move could start/stop at instantly
   function safeSpeed(k) {
-    if (k < 0 || k >= M || kind[k] > 1) return 0;
-    dir(k, da);
-    let v = V[k] || 0;
-    for (let ax = 0; ax < 3; ax++) { const c = Math.abs(da[ax]) * v; if (c > jerkXYZ[ax]) v *= jerkXYZ[ax] / c; }
-    return v;
+    axisSpeeds(k, da);
+    const ns = V[k] || 0;
+    let safe = ns, limited = false;
+    for (let ax = 0; ax < 4; ax++) {
+      const j = Math.abs(da[ax]), mj = jerkXYZ[ax];
+      if (j > mj) {
+        if (limited) { if (j * safe > ns * mj) safe = ns * mj / j; }
+        else { safe *= mj / j; limited = true; }
+      }
+    }
+    return safe;
   }
-  // Look-ahead planning like Marlin: junction limits, then a backward pass
-  // (can we still brake in time?) and a forward pass (can we accelerate that
-  // much?), then a trapezoid per move. Temperature-set / fan / progress
-  // commands don't stop motion; waits, dwells, homing and probing do.
+  const safe = new Float32Array(M);
+  // junction between consecutive planner blocks a -> b
+  function junction(a, b) {
+    const va = V[a] || 0, vb = V[b] || 0;
+    axisSpeeds(a, da); axisSpeeds(b, db);
+    let vmax = Math.min(va, vb);
+    const smaller = va > 0 ? vmax / va : 0;
+    let f = 1, limited = false;
+    for (let ax = 0; ax < 4; ax++) {
+      let vx = da[ax] * smaller, vn = db[ax];   // exit scaled, entry at b's nominal (as in firmware)
+      if (limited) { vx *= f; vn *= f; }
+      const j = vx > vn
+        ? ((vn > 0 || vx < 0) ? vx - vn : Math.max(vx, -vn))
+        : ((vn < 0 || vx > 0) ? vn - vx : Math.max(-vx, vn));
+      if (j > jerkXYZ[ax]) { f *= jerkXYZ[ax] / j; limited = true; }
+    }
+    if (limited) vmax *= f;
+    const th = vmax * 0.99;
+    if (safe[a] > th && safe[b] > th) vmax = safe[b];
+    return vmax;
+  }
+  // Commands that flush the planner (the head really stops): waits, dwells,
+  // homing, probing, pauses. Setting a temperature or the fan does not.
   const ev = mEvent.a;
   const transparent = (k) => kind[k] === 3 && (ev[k] === Ev.SetNozzle || ev[k] === Ev.SetBed);
-  const entry = new Float32Array(M);   // max entry speed
-  const exitCap = new Float32Array(M); // exit speed if the next thing is a stop
+  const MIN_SPEED = 0.05; // MINIMUM_PLANNER_SPEED
+  const entry = new Float32Array(M);
+  const exitCap = new Float32Array(M);
   const next = new Int32Array(M).fill(-1);
-  let prevMotion = -1;
+  let prev = -1;
   for (let k = 0; k < M; k++) {
     if (transparent(k)) continue;
-    const kd = kind[k];
-    if (kd === 0 || kd === 1) {
-      if (prevMotion >= 0) { next[prevMotion] = k; entry[k] = junction(prevMotion, k); }
-      else entry[k] = safeSpeed(k);
-      exitCap[k] = safeSpeed(k);
-      prevMotion = k;
-    } else {
-      prevMotion = -1; // retraction, wait, homing... the head stops
-    }
+    if (kind[k] === 3) { if (prev >= 0) exitCap[prev] = MIN_SPEED; prev = -1; continue; }
+    safe[k] = safeSpeed(k);
+    if (prev >= 0) { next[prev] = k; entry[k] = junction(prev, k); }
+    else entry[k] = safe[k];
+    exitCap[k] = MIN_SPEED;
+    prev = k;
   }
+  for (let k = 0; k < M; k++) if (kind[k] !== 3 && entry[k] > V[k]) entry[k] = V[k];
   // backward pass
   for (let k = M - 1; k >= 0; k--) {
-    if (kind[k] > 1) continue;
+    if (kind[k] === 3) continue;
     const n = next[k];
     const vExit = n >= 0 ? entry[n] : exitCap[k];
-    const a = Math.max(A[k], 50);
-    const lim = Math.sqrt(vExit * vExit + 2 * a * L[k]);
+    const lim = Math.sqrt(vExit * vExit + 2 * Math.max(A[k], 50) * L[k]);
     if (entry[k] > lim) entry[k] = lim;
   }
   // forward pass
   for (let k = 0; k < M; k++) {
-    if (kind[k] > 1) continue;
+    if (kind[k] === 3) continue;
     const n = next[k];
     if (n < 0) continue;
-    const a = Math.max(A[k], 50);
-    const lim = Math.sqrt(entry[k] * entry[k] + 2 * a * L[k]);
+    const lim = Math.sqrt(entry[k] * entry[k] + 2 * Math.max(A[k], 50) * L[k]);
     if (entry[n] > lim) entry[n] = lim;
   }
   for (let k = 0; k < M; k++) {
     const kd = kind[k];
     if (kd === 3) { raw[k] = 0; continue; }
     const l = L[k], v = Math.max(V[k], 0.1), a = Math.max(A[k], 50);
-    if (kd === 2) { raw[k] = l / v + v / a; continue; }
     const n = next[k];
     const vi = Math.min(entry[k], v), vo = Math.min(n >= 0 ? entry[n] : exitCap[k], v);
     const dAcc = (v * v - vi * vi) / (2 * a);

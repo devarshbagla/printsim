@@ -418,3 +418,7 @@ dialog .actions { margin-top: 16px; }
 .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .two-col select { min-width: 0; }
 .material-note { margin-top: -6px; }
+
+.speed-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); margin-top: 10px; }
+.speed-row input { width: 80px; background: rgba(255,255,255,.06); border: 1px solid var(--line-2); border-radius: 10px; padding: 7px 9px; font-family: var(--display); font-size: 15px; color: var(--text); outline: none; }
+.speed-row input:focus { border-color: var(--accent); }

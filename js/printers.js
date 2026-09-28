@@ -21,20 +21,34 @@ export const PRINTERS = {
       normal: { feed: [400, 400, 12, 80], accel: [7000, 7000, 400, 5000], jerk: [10, 10, 2, 10] },
       stealth: { feed: [180, 180, 12, 80], accel: [2500, 2500, 400, 5000], jerk: [8, 8, 2, 10] },
     },
-    // estimates (see header): first-order heater model
-    nozzle: { max: 320, k: 0.0105, c: 0.012, settle: 1 },   // TEMP_RESIDENCY_TIME 1 s
-    bedHeat: { max: 125, k: 0.0036, c: 0.0022, settle: 5 }, // TEMP_BED_RESIDENCY_TIME 5 s
+    // Heaters: first-order model, sized from real hardware (not published as times):
+    //  hotend 24 V 40 W cartridge (Prusa part listing; KB #12202: 12.3-15.1 ohm -> ~42 W)
+    //    into a small MINI heater block + nozzle (~11 J/K) -> ~70 s to 215 C, ~50 s to 170 C,
+    //    ~40 s to cool 215 -> 170 without the part fan
+    //  heatbed 24 V, KB #12201: 4.5-6.5 ohm -> ~105 W into bed + steel sheet (~350 J/K)
+    //    -> ~2.2 min to 60 C, ~4.4 min to 85 C
+    // Residency after reaching the window: TEMP_RESIDENCY_TIME 1 s, TEMP_BED_RESIDENCY_TIME 5 s.
+    nozzle: { max: 400, k: 0.0102, c: 0.007, settle: 1 },
+    bedHeat: { max: 125, k: 0.0036, c: 0.0022, settle: 5 },
     // G28: X/Y at HOMING_FEEDRATE_XY 50 mm/s from the park corner, travel to the
     // Z safe-homing point (147.4, 21.1), lift Z_HOMING_HEIGHT 4 mm, probe Z down at
     // 6 mm/s (~40 mm assumed) and re-bump 2 mm at 1.5 mm/s.
     homeSeconds: 20,
-    // UBL mesh: GRID_MAX_POINTS 6x6 over MESH_MIN (-41,-48) .. MESH_MAX (195,226),
-    // MULTIPLE_PROBING 2, XY_PROBE_SPEED 5000 mm/min, Z fast 6 mm/s / slow 2 mm/s,
-    // Z_CLEARANCE_BETWEEN_PROBES 1 mm, Z_CLEARANCE_MULTI_PROBE 0.5 mm.
+    // UBL mesh (ubl_G29.cpp probe_major_points): GRID_MAX_POINTS 6x6 over
+    // MESH_MIN (-41,-48)..MESH_MAX (195,226) with GRID_BORDER 1, so only the inner
+    // 4x4 points are ever probed; points must be reachable by the probe
+    // (NOZZLE_TO_PROBE_OFFSET -29,-3, MIN_PROBE_EDGE 5, X -2..180, Y -3..180).
+    // "G29 P1" probes points inside the M555 print area grown by one grid step
+    // (or inside an explicit X/Y/W/H rect); "C" skips points already probed.
+    // Bare "G29" = "G29 P1 X0 Y0" + interpolation (backward compatibility).
+    // Per point: MULTIPLE_PROBING 2 = fast probe at 6 mm/s, lift 0.5 mm, slow
+    // probe at 2 mm/s; Z_CLEARANCE_BETWEEN_PROBES 1 mm; travel XY_PROBE_SPEED
+    // 5000 mm/min at the current travel acceleration.
     probe: {
-      grid: [6, 6], min: [-41, -48], max: [195, 226], samples: 2,
+      grid: [6, 6], border: 1, min: [-41, -48], max: [195, 226], samples: 2,
+      offset: [-29, -3], edge: 5, axisMin: [-2, -3], axisMax: [180, 180],
       xySpeed: 5000 / 60, accel: 1250, zFast: 6, zSlow: 2, clearance: 1, multiClearance: 0.5,
-      startClearance: 5, overhead: 0.2,
+      startClearance: 5, overhead: 0.15, start: [147.4, 21.1],
     },
   },
   generic: {
@@ -47,9 +61,10 @@ export const PRINTERS = {
     bedHeat: { max: 130, k: 0.004, c: 0.002, settle: 5 },
     homeSeconds: 20,
     probe: {
-      grid: [5, 5], min: [0, 0], max: [220, 220], samples: 1,
+      grid: [5, 5], border: 0, min: [10, 10], max: [210, 210], samples: 1,
+      offset: [0, 0], edge: 5, axisMin: [0, 0], axisMax: [220, 220],
       xySpeed: 100, accel: 1500, zFast: 8, zSlow: 3, clearance: 2, multiClearance: 1,
-      startClearance: 5, overhead: 0.3,
+      startClearance: 5, overhead: 0.3, start: [110, 110],
     },
   },
 };
@@ -62,21 +77,46 @@ export function hwLimitsFor(model, stealth = false) {
   return null;
 }
 
-/** Seconds for a UBL probe run over an area (w x h mm), or the full grid. */
-export function probeSeconds(printer, area) {
+/**
+ * Replay of the firmware's mesh probing for one G29 command.
+ * rec: { rect: {x0,y0,x1,y1} | null (whole bed), extend: bool, accel }
+ * state: { probed: Set, pos: [x,y] }  (carried across G29 calls)
+ * Returns { seconds, points }.
+ */
+export function probeRun(printer, rec, state) {
   const pr = printer.probe;
-  const sx = (pr.max[0] - pr.min[0]) / (pr.grid[0] - 1), sy = (pr.max[1] - pr.min[1]) / (pr.grid[1] - 1);
-  let nx = pr.grid[0], ny = pr.grid[1];
-  if (area && area.w > 0 && area.h > 0) {
-    nx = Math.min(pr.grid[0], Math.ceil(area.w / sx) + 1);
-    ny = Math.min(pr.grid[1], Math.ceil(area.h / sy) + 1);
+  const [gx, gy] = pr.grid, b = pr.border;
+  const dx = (pr.max[0] - pr.min[0]) / (gx - 1), dy = (pr.max[1] - pr.min[1]) / (gy - 1);
+  const minPX = Math.max(pr.edge, pr.axisMin[0] + pr.offset[0]), maxPX = Math.min(pr.axisMax[0] - pr.edge, pr.axisMax[0] + pr.offset[0]);
+  const minPY = Math.max(pr.edge, pr.axisMin[1] + pr.offset[1]), maxPY = Math.min(pr.axisMax[1] - pr.edge, pr.axisMax[1] + pr.offset[1]);
+  let rect = rec && rec.rect;
+  if (rec && rec.grow && rect) rect = { x0: rect.x0 - dx, y0: rect.y0 - dy, x1: rect.x1 + dx, y1: rect.y1 + dy };
+  if (!rec || !rec.extend) state.probed.clear();
+  const pts = [];
+  for (let y = gy - b - 1, row = 0; y >= b; y--, row++) {
+    const odd = row % 2 === 1;
+    for (let k = 0; k < gx - 2 * b; k++) {
+      const x = odd ? b + k : gx - 1 - b - k;
+      const px = pr.min[0] + x * dx, py = pr.min[1] + y * dy;
+      if (px < minPX || px > maxPX || py < minPY || py > maxPY) continue;
+      if (rect && (px < rect.x0 || px > rect.x1 || py < rect.y0 || py > rect.y1)) continue;
+      const key = x * 100 + y;
+      if (state.probed.has(key)) continue;
+      state.probed.add(key);
+      pts.push([px - pr.offset[0], py - pr.offset[1]]); // nozzle position over the point
+    }
   }
-  const pts = nx * ny;
-  const hop = (d) => { const v = pr.xySpeed, a = pr.accel; return d > v * v / a ? d / v + v / a : 2 * Math.sqrt(d / a); };
-  const travel = ((nx - 1) * ny * hop(sx) + (ny - 1) * hop(sy)) + hop(60); // snake + approach
-  const zPer = pr.clearance / pr.zFast + (pr.clearance + 0.3) / pr.zFast
-    + (pr.samples - 1) * (pr.multiClearance / pr.zFast + (pr.multiClearance + 0.1) / pr.zSlow);
-  return travel + pts * (zPer + pr.overhead) + pr.startClearance / pr.zFast;
+  if (!pts.length) return { seconds: 0, points: 0 };
+  const a = (rec && rec.accel) || pr.accel, v = pr.xySpeed;
+  const hop = (d) => (d > v * v / a ? d / v + v / a : 2 * Math.sqrt(d / a));
+  let t = pr.startClearance / pr.zFast;
+  let cur = state.pos || pr.start;
+  for (const p of pts) { t += hop(Math.hypot(p[0] - cur[0], p[1] - cur[1])); cur = p; }
+  state.pos = cur;
+  const zPer = pr.clearance / pr.zFast + (pr.clearance + 0.2) / pr.zFast
+    + (pr.samples - 1) * (pr.multiClearance / pr.zFast + (pr.multiClearance + 0.05) / pr.zSlow);
+  t += pts.length * (zPer + pr.overhead);
+  return { seconds: t, points: pts.length };
 }
 
 export const AMBIENT = 22;

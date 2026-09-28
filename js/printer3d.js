@@ -153,12 +153,12 @@ export class PrinterModel {
     // ---------------- static frame
     const R = this.root;
     // Y spine under the bed
-    R.add(bb(-56, 56, baseY, -20, -hd - 85, hd + 85, m.frame, 4));
-    R.add(bb(-62, 62, baseY, -14, hd + 72, hd + 92, m.printed, 4));   // front Y end
-    R.add(bb(-62, 62, baseY, -14, -hd - 92, -hd - 72, m.printed, 4)); // rear Y end
-    for (const x of [-38, 38]) R.add(rod('z', -hd - 80, hd + 80, 4, m.chrome, x, -22));
+    R.add(bb(-56, 56, baseY, -20, -hd - 75, hd + 75, m.frame, 4));   // 330 mm deep overall
+    R.add(bb(-62, 62, baseY, -14, hd + 57, hd + 75, m.printed, 4));   // front Y end
+    R.add(bb(-62, 62, baseY, -14, -hd - 75, -hd - 57, m.printed, 4)); // rear Y end
+    for (const x of [-38, 38]) R.add(rod('z', -hd - 60, hd + 60, 4, m.chrome, x, -22));
     // feet
-    for (const [x, z] of [[-50, hd + 84], [50, hd + 84], [-50, -hd - 84], [50, -hd - 84]]) {
+    for (const [x, z] of [[-50, hd + 68], [50, hd + 68], [-50, -hd - 68], [50, -hd - 68]]) {
       const f = new THREE.Mesh(new THREE.CylinderGeometry(7, 8, 4, 20), m.rubber);
       f.position.set(x, baseY - 2, z); R.add(f);
     }
@@ -192,7 +192,7 @@ export class PrinterModel {
     disp.add(screen);
     const dial = new THREE.Mesh(new THREE.CylinderGeometry(10, 11, 10, 32), m.motor);
     dial.rotation.x = Math.PI / 2; dial.position.set(0, 22, 18); disp.add(dial);
-    disp.position.set(colX - 10, baseY, hd + 70);
+    disp.position.set(colX - 10, baseY, hd + 58);
     disp.rotation.x = -0.2;
     R.add(disp);
 
@@ -343,6 +343,6 @@ export class PrinterModel {
   }
 
   get bounds() {
-    return { min: [-this.bedW / 2 - 90, this.baseY, -this.bedD / 2 - 95], max: [this.colX + 50, 390, this.bedD / 2 + 95] };
+    return { min: [-this.bedW / 2 - 90, this.baseY, -this.bedD / 2 - 80], max: [this.colX + 50, 390, this.bedD / 2 + 80] };
   }
 }

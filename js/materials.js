@@ -1,61 +1,68 @@
 // Filament behaviour for the support/physics check.
 //
-// overhang: steepest printable overhang (degrees from vertical) with the part
-//           fan at 100% and with it off. Converted to how far (mm) a strand may
-//           sit past the one below it: layerHeight * tan(angle).
-// bridge:   longest reliable bridge (mm), fan full / fan off.
-// cantilever: unsupported mm a strand gets away with before it droops off.
-// sag:      bridge droop coefficient (mm of sag ~ sag * span^2 / 10).
-// curl:     how wild fallen strands get (stringy/floppy materials curl more).
-// hotPenalty: per °C above `hotAbove`, overhang/bridge performance drops.
+// These are FAILURE limits (where strands collapse into spaghetti), which sit
+// above the usual QUALITY limits (where supports are recommended). Quality
+// references: PLA 55-60 deg, PETG 45-50, ABS 40-45 (3dmag.com overhang table);
+// Bambu rates PLA at 55 deg / 30 mm bridge on its own, strongly cooled printers.
+// Prusa's PETG guide: "bridging- and overhang-behavior is usually worse" than PLA.
 //
-// PLA gets the most attention: it's what most people print, and its overhang
-// and bridge quality is dominated by part cooling, so the per-strand fan speed
-// from the G-code (M106/M107) feeds straight into its limits.
+// Each material is judged against ITS OWN normal cooling, taken from Prusa's
+// PrusaSlicer filament profiles for the MINI (max_fan_speed): PLA 100 %,
+// PETG 50 %, ASA 20 %, ABS 15 %, PC 20 %, PA 20 %, FLEX 50 %. A PETG print at
+// 50 % fan is "fully cooled" for PETG; fan off is the second value of each pair.
+//
+// overhang:  steepest overhang (deg from vertical) before strands fall off,
+//            at reference cooling / with the fan off
+// bridge:    longest straight span (mm) that holds, reference / fan off
+// cantilever: unsupported mm a strand can stick out before drooping off
+// sag:       bridge droop coefficient (mm of sag ~ sag * span^2 / 10)
+// curl:      how wild fallen strands get (stringy/floppy materials curl more)
+// hotAbove / hotPenalty: printing hotter than the Prusa profile temperature
+//            (+~5 C margin) costs overhang/bridge performance per degree
 
 export const MATERIALS = {
   PLA: {
-    name: 'PLA', overhang: [69, 52], bridge: [40, 12], cantilever: [1.8, 0.8],
-    sag: [0.0035, 0.012], curl: 1.0, hotAbove: 220, hotPenalty: 0.012,
-    note: 'PLA loves cooling: overhangs and bridges are judged against the part-fan speed in your file.',
+    name: 'PLA', refFan: 1.0, overhang: [68, 55], bridge: [35, 10], cantilever: [1.8, 0.8],
+    sag: [0.0035, 0.012], curl: 1.0, hotAbove: 225, hotPenalty: 0.012,
+    note: 'PLA loves cooling: overhangs and bridges are judged against the part-fan speed on every strand.',
   },
   PETG: {
-    name: 'PETG', overhang: [62, 52], bridge: [22, 10], cantilever: [1.2, 0.7],
-    sag: [0.009, 0.016], curl: 1.35, hotAbove: 250, hotPenalty: 0.008,
-    note: 'PETG sags and strings more than PLA, so bridges get shorter limits.',
+    name: 'PETG', refFan: 0.5, overhang: [60, 52], bridge: [20, 10], cantilever: [1.2, 0.7],
+    sag: [0.009, 0.016], curl: 1.35, hotAbove: 255, hotPenalty: 0.008,
+    note: 'PETG bridges and overhangs worse than PLA and sags more; judged against its usual ~50% fan.',
   },
   ABS: {
-    name: 'ABS', overhang: [60, 55], bridge: [20, 14], cantilever: [1.2, 0.9],
+    name: 'ABS', refFan: 0.15, overhang: [57, 54], bridge: [15, 12], cantilever: [1.1, 0.9],
     sag: [0.008, 0.011], curl: 1.1, hotAbove: 260, hotPenalty: 0.006,
-    note: 'ABS usually prints with little cooling, so overhangs are judged conservatively.',
+    note: 'ABS prints with little cooling (~15% fan), so overhangs are judged conservatively.',
   },
   ASA: {
-    name: 'ASA', overhang: [60, 55], bridge: [20, 14], cantilever: [1.2, 0.9],
+    name: 'ASA', refFan: 0.2, overhang: [57, 54], bridge: [15, 12], cantilever: [1.1, 0.9],
     sag: [0.008, 0.011], curl: 1.1, hotAbove: 265, hotPenalty: 0.006,
-    note: 'ASA behaves like ABS: modest cooling, moderate overhangs.',
+    note: 'ASA behaves like ABS: ~20% fan, moderate overhangs.',
   },
   PC: {
-    name: 'PC', overhang: [58, 52], bridge: [16, 10], cantilever: [1.0, 0.7],
-    sag: [0.01, 0.014], curl: 1.05, hotAbove: 285, hotPenalty: 0.005,
-    note: 'Polycarbonate runs hot with little cooling, so overhangs are limited.',
+    name: 'PC', refFan: 0.2, overhang: [56, 52], bridge: [14, 10], cantilever: [1.0, 0.7],
+    sag: [0.01, 0.014], curl: 1.05, hotAbove: 280, hotPenalty: 0.005,
+    note: 'Polycarbonate runs hot with ~20% fan, so overhangs are limited.',
   },
   PA: {
-    name: 'Nylon (PA)', overhang: [57, 50], bridge: [16, 10], cantilever: [1.0, 0.7],
-    sag: [0.011, 0.016], curl: 1.25, hotAbove: 275, hotPenalty: 0.005,
+    name: 'Nylon (PA)', refFan: 0.2, overhang: [55, 50], bridge: [14, 9], cantilever: [1.0, 0.7],
+    sag: [0.011, 0.016], curl: 1.25, hotAbove: 290, hotPenalty: 0.005,
     note: 'Nylon is soft when hot and sags on long spans.',
   },
   TPU: {
-    name: 'TPU / flex', overhang: [52, 45], bridge: [8, 5], cantilever: [0.6, 0.4],
-    sag: [0.03, 0.045], curl: 1.9, hotAbove: 235, hotPenalty: 0.01,
+    name: 'TPU / flex', refFan: 0.5, overhang: [52, 48], bridge: [8, 5], cantilever: [0.6, 0.4],
+    sag: [0.03, 0.045], curl: 1.9, hotAbove: 245, hotPenalty: 0.01,
     note: 'Flexible filament barely bridges and droops easily.',
   },
   PVA: {
-    name: 'PVA / support', overhang: [55, 50], bridge: [12, 8], cantilever: [0.8, 0.6],
+    name: 'PVA / support', refFan: 1.0, overhang: [55, 50], bridge: [12, 8], cantilever: [0.8, 0.6],
     sag: [0.012, 0.018], curl: 1.2, hotAbove: 225, hotPenalty: 0.01,
     note: 'Soluble support material: weak overhangs.',
   },
   GENERIC: {
-    name: 'Other', overhang: [60, 50], bridge: [20, 10], cantilever: [1.2, 0.7],
+    name: 'Other', refFan: 0.5, overhang: [60, 52], bridge: [18, 10], cantilever: [1.2, 0.7],
     sag: [0.008, 0.014], curl: 1.2, hotAbove: 250, hotPenalty: 0.008,
     note: 'Unknown filament: using middle-of-the-road limits.',
   },
@@ -82,7 +89,8 @@ export function nozzleTemp(config) {
 
 /** Limits for one strand given fan (0..1) and nozzle temp. */
 export function limitsFor(mat, fan01, temp) {
-  const f = Math.max(0, Math.min(1, fan01));
+  // cooling relative to this material's normal fan (more than normal doesn't help much)
+  const f = Math.max(0, Math.min(1, fan01 / (mat.refFan || 1)));
   const lerp = (a) => a[1] + (a[0] - a[1]) * f;
   let hot = 1;
   if (temp && temp > mat.hotAbove) hot = Math.max(0.6, 1 - (temp - mat.hotAbove) * mat.hotPenalty);

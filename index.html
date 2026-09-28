@@ -132,6 +132,8 @@
           </div>
           <p class="hint">Read these off the printer screen. Cold printer? Leave room temp.</p>
           <label class="toggle hidden" id="stealth-row"><input type="checkbox" id="stealth"> Printer is in stealth (quiet) mode</label>
+          <label class="speed-row">Print speed on the printer <input id="speed-pct" type="number" inputmode="numeric" min="10" max="999" value="100"><span>%</span></label>
+          <p class="hint">Leave at 100% unless someone changed Tune › Speed on the printer. That setting sticks between prints until the printer restarts.</p>
         </div>
         <div class="field">
           <span class="label">Filament colour</span>
@@ -173,6 +175,7 @@
           <span class="label">Filament colour</span>
           <div class="swatches" data-swatches></div>
         </div>
+        <label class="speed-row">Printer speed <input id="run-speed" type="number" inputmode="numeric" min="10" max="999" value="100"><span>%</span></label>
         <label class="toggle"><input type="checkbox" id="wake"> Keep screen on</label>
         <div class="more-actions">
           <button id="btn-finished" class="btn" type="button">Printer finished</button>
