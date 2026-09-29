@@ -304,6 +304,8 @@ select:focus, .temps input:focus, .resync-input input:focus { border-color: var(
 }
 .progress.startup i { background: repeating-linear-gradient(45deg, rgba(255,255,255,.28) 0 8px, rgba(255,255,255,.12) 8px 16px); width: 100% !important; animation: slide 1s linear infinite; background-size: 22.6px 22.6px; }
 @keyframes slide { to { background-position: 22.6px 0; } }
+/* paused: nothing on the bar moves (the warm-up stripes stop sliding) */
+.progress.paused i { animation-play-state: paused; opacity: .55; box-shadow: none; }
 .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .stats > div {
   padding: 10px 12px; border-radius: 12px;

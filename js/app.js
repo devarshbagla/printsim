@@ -627,6 +627,7 @@ function updateRunUI(t) {
   });
   $('bar').style.width = `${st.percent.toFixed(2)}%`;
   $('bar').parentElement.classList.toggle('startup', st.startup);
+  $('bar').parentElement.classList.toggle('paused', !run.running); // freezes the warm-up stripes too
   document.title = `${pct}% · printsim`;
 
   const remaining = Math.max(0, tl.total - s);
