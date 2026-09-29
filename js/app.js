@@ -14,8 +14,12 @@ const SWATCHES = [
   ['Blue', '#1f6feb'], ['Purple', '#7b3fe4'], ['Pink', '#ff6fae'], ['Lavender', '#b9a3f5'],
 ];
 
-const prefs = Object.assign({ color: null, ghost: true, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true, printerView: true }, lsGet('printsim.prefs', {}));
+const prefs = Object.assign({ color: null, ghost: true, ghostRun: false, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true, printerView: true }, lsGet('printsim.prefs', {}));
 const savePrefs = () => lsSet('printsim.prefs', prefs);
+// "what's left to print" overlay: on while previewing, off by default while a
+// print runs (the live build reads better on its own); each remembered separately
+const ghostKey = () => (mode === 'run' ? 'ghostRun' : 'ghost');
+const ghostOn = () => !!prefs[ghostKey()];
 
 // ---------------------------------------------------------------- state
 let view;
@@ -227,7 +231,8 @@ function setMode(m) {
   updateLegend();
   if (m !== 'setup') setPlaying(false);
   if (m === 'setup') applyScrub();
-  if (m === 'run') { view.setWarnTint(0); view.setPhysics(prefs.physics); }
+  view.setGhost(ghostOn());
+  if (m === 'run') { view.setWarnTint(0); view.setPhysics(prefs.physics); scheduleGhostHint(); } else hideGhostHint();
   if (m === 'done') { view.setHead(parsed.segs.move.length, null, false, false); view.setSimTime(1e9); view.setWarnTint(0); view.setScreen({ title: 'finished', big: '100%', line1: 'Print done', line2: '', progress: 1, accent: accentHex() }); }
   if (m === 'empty') document.title = 'printsim';
   lastUi = 0;
@@ -628,12 +633,52 @@ function updateRunUI(t) {
 function updateLegend() {
   const on = prefs.colorMode === 'feature' && mode !== 'empty' && parsed;
   $('vc-mode').setAttribute('aria-pressed', prefs.colorMode === 'feature');
-  $('vc-ghost').setAttribute('aria-pressed', !!prefs.ghost);
+  $('vc-ghost').setAttribute('aria-pressed', ghostOn());
   show('legend', !!on);
   if (!on) return;
   $('legend').innerHTML = parsed.features
     .map(f => `<span><i style="background:${FEATURE_COLORS[f]}"></i>${f === Feature.Custom ? 'Purge / custom' : FeatureNames[f]}</span>`)
     .join('');
+}
+
+// ---------------------------------------------------------------- ghost hint (laptops only)
+// A one-line nudge next to the overlay button, shown a few seconds into a live
+// print, only on big screens with a mouse. It goes away by itself, and never
+// comes back once the button was used or the hint closed (max 2 showings).
+const HINT_KEY = 'printsim.ghostHint';
+let hintTimer = 0;
+function hintAllowed() {
+  const h = lsGet(HINT_KEY, { shown: 0, done: false });
+  return !h.done && h.shown < 2 && !ghostOn() &&
+    matchMedia('(min-width: 900px) and (min-height: 560px) and (hover: hover) and (pointer: fine)').matches;
+}
+function scheduleGhostHint() {
+  clearTimeout(hintTimer);
+  if (!hintAllowed()) return;
+  hintTimer = setTimeout(() => {
+    if (mode !== 'run' || !hintAllowed()) return;
+    const h = lsGet(HINT_KEY, { shown: 0, done: false });
+    lsSet(HINT_KEY, { ...h, shown: h.shown + 1 });
+    const el = $('ghost-hint');
+    const b = $('vc-ghost').getBoundingClientRect();
+    el.style.top = `${b.top + b.height / 2}px`;
+    el.style.right = `${window.innerWidth - b.left + 12}px`;
+    show(el, true);
+    void el.offsetWidth; // start the fade from the hidden state
+    el.classList.add('in');
+    hintTimer = setTimeout(hideGhostHint, 12000);
+  }, 6000);
+}
+function hideGhostHint() {
+  clearTimeout(hintTimer);
+  const el = $('ghost-hint');
+  if (!el || el.classList.contains('hidden')) return;
+  el.classList.remove('in');
+  setTimeout(() => { if (!el.classList.contains('in')) show(el, false); }, 250);
+}
+function retireGhostHint() {
+  lsSet(HINT_KEY, { shown: 2, done: true });
+  hideGhostHint();
 }
 
 // ---------------------------------------------------------------- wake lock
@@ -807,11 +852,13 @@ function wire() {
     updateLegend();
   };
   $('vc-ghost').onclick = () => {
-    prefs.ghost = !prefs.ghost;
+    prefs[ghostKey()] = !ghostOn();
     savePrefs();
-    view.setGhost(prefs.ghost);
+    view.setGhost(ghostOn());
     updateLegend();
+    if (mode === 'run') retireGhostHint();
   };
+  $('ghost-hint-close').onclick = retireGhostHint;
 }
 
 async function handleFile(f) {
@@ -841,7 +888,8 @@ function trackInsets() {
   let left = 0, bottom = 0;
   if (!sheet.classList.contains('hidden')) {
     const r = sheet.getBoundingClientRect();
-    if (window.innerWidth >= 900) left = r.right; else bottom = window.innerHeight - r.top;
+    // side card (laptops, phones on their side) vs bottom sheet
+    if (r.width < window.innerWidth * 0.75) left = r.right; else bottom = window.innerHeight - r.top;
   }
   view.setInsets(left, bottom);
   // refit once per layout (mode / file / big resize)
@@ -862,7 +910,7 @@ async function init() {
   view = new PrintView($('view'));
   view.onFrame = frame;
   view.setColorMode(prefs.colorMode);
-  view.setGhost(prefs.ghost);
+  view.setGhost(ghostOn());
   view.setPhysics(prefs.physics);
   view.setPrinterView(prefs.printerView);
   $('vc-printer').setAttribute('aria-pressed', prefs.printerView);

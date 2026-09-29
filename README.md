@@ -9,7 +9,7 @@ It's a simulation, not a camera. If the real print fails, printsim will happily 
 ## Features
 
 - **Reads Prusa binary G-code (`.bgcode`)** natively (Heatshrink + MeatPack decoding, written from the format spec and verified byte-for-byte against Prusa's reference decoder), plus plain `.gcode`.
-- **Live 3D view** of every extrusion, with the unprinted part shown as a ghost, a nozzle marker, and freshly laid plastic glowing warm.
+- **Live 3D view** of every extrusion, with a nozzle marker and freshly laid plastic glowing warm. The unprinted rest of the model can be shown as a see-through ghost (on while previewing, off by default during a live print; laptops get a one-time tip next to the button).
 - **Filament colour** picker so the model matches what's actually on the spool. The UI accent follows it.
 - **Colour by feature** (perimeters, infill, supports...) to see *how* a print is built.
 - **Timelapse preview** before you print: play the whole thing at 10×, 50×, 200× or 1000×, or **layer by layer** like a printer camera timelapse.

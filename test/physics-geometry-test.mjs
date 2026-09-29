@@ -54,31 +54,61 @@ function layerSamples(segs, layers, res, L) {
 }
 
 // ---------------------------------------------------------------- 3. line 30% on a pad
-{
-  // layer 1: 10x10 mm pad of lines at y 0..10; layers 2 & 3: one line from x=0 to x=33 at y=5
+// synthetic layers: `build(layers)` where each layer is a list of [x0,y0,x1,y1,feature]
+function build(layerList) {
   const W = 0.45, segs = { start: [], end: [], meta: [], fan: [], move: [] }, layerZ = [], layerSeg = [];
   let m = 0;
-  const line = (x0, y0, x1, y1, z, feat) => {
-    segs.start.push(x0, y0, z); segs.end.push(x1, y1, z); segs.meta.push(feat * 4 + W); segs.fan.push(255); segs.move.push(m++);
-  };
-  layerZ.push(0.2); layerSeg.push(0);
-  for (let y = 0.2; y < 10; y += W) line(0, y, 10, y, 0.2, 5);
-  for (const z of [0.4, 0.6]) { layerZ.push(z); layerSeg.push(segs.meta.length); line(0, 5, 33, 5, z, 2); }
+  for (const [z, lines] of layerList) {
+    layerZ.push(z); layerSeg.push(segs.meta.length);
+    for (const [x0, y0, x1, y1, feat] of lines) {
+      segs.start.push(x0, y0, z); segs.end.push(x1, y1, z); segs.meta.push(feat * 4 + W); segs.fan.push(255); segs.move.push(m++);
+    }
+  }
   const S = {
     start: Float32Array.from(segs.start), end: Float32Array.from(segs.end), meta: Float32Array.from(segs.meta),
     fan: Uint8Array.from(segs.fan), move: Uint32Array.from(segs.move),
   };
-  const layers = { z: Float32Array.from(layerZ), seg: Uint32Array.from(layerSeg) };
+  return { S, layers: { z: Float32Array.from(layerZ), seg: Uint32Array.from(layerSeg) } };
+}
+const pad = () => { const out = []; for (let y = 0.2; y < 10; y += 0.45) out.push([0, y, 10, y, 5]); return out; };
+const far = [[60, 60, 70, 60, 5]]; // keeps an otherwise empty layer from being empty
+{
+  // a 2 mm tall 10x10 pad, then one line from x=0 to x=33 at y=5 (2 layers)
+  const L = [];
+  for (let i = 1; i <= 10; i++) L.push([+(i * 0.2).toFixed(2), pad()]);
+  L.push([2.2, [[0, 5, 33, 5, 2]]], [2.4, [[0, 5, 33, 5, 2]]]);
+  const { S, layers } = build(L);
   const res = analyzeSupport(S, layers, { material: 'PLA', temp: 215 });
-  const l2 = layerSamples(S, layers, res, 1);
+  const l2 = layerSamples(S, layers, res, 10);
   const held = l2.filter((q) => q.drop === 0), fell = l2.filter((q) => q.drop > 0);
   const edge = Math.max(...held.map((q) => q.x));
   check('line: part over the pad holds', l2.filter((q) => q.x < 9.5).every((q) => q.drop === 0));
   check('line: hinge ~cantilever length past the pad edge', edge > 10.2 && edge < 13, `held to x=${edge.toFixed(2)}`);
-  check('line: the rest falls to the bed', fell.length > 0 && fell.every((q) => q.x > edge && q.drop > 0), `${fell.length} samples fall, first at x=${Math.min(...fell.map((q) => q.x)).toFixed(2)}`);
-  const l3 = layerSamples(S, layers, res, 2);
+  check('line: the rest falls to the bed', fell.length > 0 && fell.every((q) => q.x > edge && q.drop > 1.5), `${fell.length} samples fall, first at x=${Math.min(...fell.map((q) => q.x)).toFixed(2)}`);
+  const l3 = layerSamples(S, layers, res, 11);
   check('line: next layer holds over the held part', l3.filter((q) => q.x < edge - 0.6).every((q) => q.drop === 0));
   check('line: next layer falls over the gap', l3.filter((q) => q.x > edge + 3).every((q) => q.drop > 0));
+}
+
+// ---------------------------------------------------------------- 4. print-in-place gap
+{
+  // pad up to z 2.0, nothing at 2.1-2.4, a floating square at 2.5 and 2.6 (0.5 mm clearance,
+  // like a hinge knuckle over the part below), and one 3 mm up (too far: falls)
+  const L = [];
+  for (let i = 1; i <= 10; i++) L.push([+(i * 0.2).toFixed(2), pad()]);
+  const sq = (a) => [[a, a, 10 - a, a, 1], [10 - a, a, 10 - a, 10 - a, 1], [10 - a, 10 - a, a, 10 - a, 1], [a, 10 - a, a, a, 1]];
+  for (const z of [2.1, 2.2, 2.3, 2.4]) L.push([z, far]);
+  L.push([2.5, sq(2)], [2.6, sq(2)]);
+  for (let z = 2.7; z < 4.95; z += 0.1) L.push([+z.toFixed(2), far]);
+  L.push([5.0, [[20, 0, 30, 0, 1], [30, 0, 30, 10, 1], [30, 10, 20, 10, 1], [20, 10, 20, 0, 1]]]);
+  const { S, layers } = build(L);
+  const res = analyzeSupport(S, layers, { material: 'PLA', temp: 215 });
+  const zi = (z) => Array.from(layers.z).findIndex((v) => Math.abs(v - z) < 1e-3);
+  const a = layerSamples(S, layers, res, zi(2.5)), b = layerSamples(S, layers, res, zi(2.6));
+  check('gap: island 0.5 mm over the part lands on it and holds', a.every((q) => q.drop === 0) && a.some((q) => q.sag > 0.2), `sag ${Math.max(...a.map((q) => q.sag)).toFixed(2)} mm`);
+  check('gap: the layer on top of it holds', b.every((q) => q.drop === 0 && q.sag === 0));
+  const c = layerSamples(S, layers, res, zi(5.0));
+  check('gap: island 5 mm over the bed still falls', c.every((q) => q.drop > 4));
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

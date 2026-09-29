@@ -16,7 +16,8 @@
 //    enough -> bridge: holds, sags (span^2).
 //  - Short unsupported stretch (<= cantilever limit) -> holds.
 //  - Anything else falls, except the first `cantilever` mm next to an anchor,
-//    which stays put as a hinge.
+//    which stays put as a hinge, and anything printed within CATCH of held
+//    plastic or the bed below (it just sags onto it: print-in-place gaps).
 //
 // Only held samples are stamped into the height map, so whatever gets printed
 // on top of fallen plastic falls too (the spaghetti cascade). Fallen plastic
@@ -29,6 +30,10 @@ const CELL = 0.15;     // height-map resolution (mm)
 const SAMPLE = 0.4;    // mm between support samples along a strand
 const SAG_MIN = 0.06;  // mm; smaller sag isn't worth drawing
 const LINK_TOL = 0.05; // mm; consecutive moves closer than this form one strand
+// A strand with held plastic (or the bed) at most this far below the nozzle
+// lands on it instead of falling. Estimate: print-in-place gaps of 0.3-0.5 mm
+// and support gaps of 0.1-0.3 mm print fine; ~1 mm starts getting stringy.
+const CATCH = 0.8;
 
 const featureOf = (m) => Math.floor(m / 4 + 1e-3);
 const widthOf = (m) => m - featureOf(m) * 4;
@@ -48,7 +53,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
   const NL = layerZ.length;
   const summary = {
     failedSegments: 0, failedLength: 0, totalLength: 0, firstLayer: -1, lastLayer: -1, layersAffected: 0,
-    bridges: 0, maxSag: 0, material: opts.material || 'PLA',
+    bridges: 0, maxSag: 0, caught: 0, material: opts.material || 'PLA',
   };
   const segSampleStart = new Uint32Array(S + 1);
   const segSamples = new Uint16Array(S);
@@ -111,6 +116,18 @@ export function analyzeSupport(segs, layers, opts = {}) {
   const groundAt = (x, y) => {
     const j = cy(y) * W + cx(x);
     return Math.max(0, top[j], debris[j]);
+  };
+
+  // highest held plastic within r (lines side by side leave hairline gaps in the map)
+  const topNear = (x, y, r) => {
+    const X = cx(x), Y = cy(y), lim = r + CELL * 0.5;
+    let best = -1;
+    for (let k = 0; k < offD.length && offD[k] <= lim; k++) {
+      const xx = X + offDX[k], yy = Y + offDY[k];
+      if (xx < 0 || yy < 0 || xx >= W || yy >= H) continue;
+      const v = top[yy * W + xx]; if (v > best) best = v;
+    }
+    return best;
   };
 
   const firstZ = layerZ[0];
@@ -241,8 +258,19 @@ export function analyzeSupport(segs, layers, opts = {}) {
           }
         }
       }
-      // --- same-layer bonding map: vertically supported samples only
-      for (let j = 0; j < n; j++) if (sOk[j] === 1) {
+      // --- caught: unsupported, but printed a hair above a surface (a print-in-place
+      // clearance gap, a support gap). It sags onto that surface and printing
+      // carries on, so it's held and the next layer can build on it.
+      for (let j = 0; j < n; j++) if (sFall[j]) {
+        const g = Math.max(0, topNear(sX[j], sY[j], widthOf(meta[sSeg[j]]) * 0.5 + CELL));
+        if (z - g <= CATCH) {
+          sFall[j] = 0; sOk[j] = 5;
+          sampleSag[sIdx[j]] = Math.max(0, z - h - g);
+          summary.caught += sLen[j];
+        }
+      }
+      // --- same-layer bonding map: vertically supported or caught samples
+      for (let j = 0; j < n; j++) if (sOk[j] === 1 || sOk[j] === 5) {
         const c = cy(sY[j]) * W + cx(sX[j]);
         side[c] = L + 1;
       }
@@ -252,8 +280,9 @@ export function analyzeSupport(segs, layers, opts = {}) {
         const w = widthOf(meta[sSeg[j]]);
         if (!sFall[j]) {
           // hinges (3) and stubs (4) hang on but droop: stamped one layer low so they
-          // don't count as support, otherwise overhangs could creep out ~2 mm per layer
-          const zz = (sOk[j] === 3 || sOk[j] === 4) ? z - h * 1.5 : z - sampleSag[sIdx[j]];
+          // don't count as support (or as a surface to catch on), otherwise overhangs
+          // could creep out ~2 mm per layer
+          const zz = (sOk[j] === 3 || sOk[j] === 4) ? z - h * 1.5 - CATCH : sOk[j] === 5 ? z : z - sampleSag[sIdx[j]];
           stampDisk(top, sX[j], sY[j], zz, w * 0.5);
         } else {
           const g = groundAt(sX[j], sY[j]);

@@ -367,7 +367,15 @@ export class PrintView {
   fit() {
     const b = this.bbox;
     let cx = 0, cy = 0, cz = 0, r = Math.max(this.bedW, this.bedD) * 0.55;
-    if (this.printerView && this.printer) {
+    const w0 = Math.max(this.lastW || this.canvas.clientWidth, 1), h0 = Math.max(this.lastH || this.canvas.clientHeight, 1);
+    const narrow = Math.min(w0, h0) < 600; // phones: the print is the point, not the frame
+    if (this.printerView && this.printer && narrow) {
+      // frame the bed and the print; the gantry and frame run off the edges
+      const top = b && isFinite(b.max[2]) ? b.max[2] : 20;
+      const pd = b && isFinite(b.min[0]) ? Math.hypot(b.max[0] - b.min[0], b.max[1] - b.min[1], b.max[2] - b.min[2]) : 60;
+      cx = 0; cy = Math.max(18, top * 0.45); cz = 0;
+      r = Math.max(this.bedW * 0.55, pd * 0.6, top * 0.7 + 30);
+    } else if (this.printerView && this.printer) {
       const pb = this.printer.bounds;
       cx = (pb.min[0] + pb.max[0]) / 2; cy = (pb.min[1] + pb.max[1]) / 2 - 20; cz = (pb.min[2] + pb.max[2]) / 2;
       r = Math.hypot(pb.max[0] - pb.min[0], pb.max[1] - pb.min[1], pb.max[2] - pb.min[2]) * (this.camera.aspect < 1 ? 0.46 : 0.38);

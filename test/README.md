@@ -12,5 +12,6 @@ node test/physics-test.mjs samples/*.gcode test/bridge.gcode /tmp/libbgcode/test
 # support check: mushroom must fail from its cap up, everything else 0%
 node test/physics-geometry-test.mjs
 # geometry: a 26 mm bridge holds and sags a little, the mushroom cap over the stem holds
-# while its rim falls, a line hanging 70% off a pad hinges ~2 mm past the edge then drops
+# while its rim falls, a line hanging 70% off a pad hinges ~2 mm past the edge then drops,
+# and a part printed 0.5 mm over another (print-in-place gap) lands on it instead of falling
 ```

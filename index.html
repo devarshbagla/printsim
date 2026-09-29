@@ -46,11 +46,24 @@
         <button id="btn-sample-fail" class="linkbtn subtle" type="button" data-sample="mushroom-no-supports.gcode">or one that forgot its supports</button>
       </div>
       <p class="fine">Runs entirely in your browser. Your file never leaves this device.</p>
+
+      <section class="about" aria-labelledby="about-h">
+        <h2 id="about-h">New here? Here's the deal</h2>
+        <p>Lab printers like the Prusa MINI+ aren't on the network, so once you hit print, the only way to check on it is to walk back. printsim is a stand-in: give it the same file you gave the printer, tap <b>Start</b> when the printer starts, and it rebuilds the print in 3D in real time, with how long is left and when it'll be done.</p>
+        <ul class="perks">
+          <li><b>Live 3D build</b><span>The printer moves and the layers stack up as they print, from your dorm or class.</span></li>
+          <li><b>Timelapse first</b><span>Scrub or play the whole print at up to 1000× before you commit an 8 hour print.</span></li>
+          <li><b>Spaghetti check</b><span>Forgot supports? It flags what'll droop or fall, and shows it happening.</span></li>
+          <li><b>Close the tab, it's fine</b><span>It remembers the print. Come back later and it picks up where the printer should be.</span></li>
+        </ul>
+      </section>
+
       <ol class="steps">
         <li><b>Load</b> the same file you sent to the printer</li>
         <li><b>Start</b> the sim the moment you press print</li>
         <li><b>Resync</b> any time by typing the % on the printer's screen</li>
       </ol>
+      <p class="fine tail">Tuned for the Prusa MINI / MINI+ using Prusa's own firmware numbers. Other printers get a generic profile. Timing is an estimate, not a live feed.</p>
     </div>
   </section>
 
@@ -72,6 +85,12 @@
     </button>
     <button id="vc-ghost" type="button" title="Show what's left to print" aria-label="Show what's left to print" aria-pressed="true">
       <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M12 3 4 7.5v9L12 21l8-4.5v-9z" stroke-dasharray="2.5 2.5"/><path d="M4 16.5 12 21l8-4.5v-4L12 17l-8-4.5z" fill="currentColor" fill-opacity=".35"/></svg>
+    </button>
+  </div>
+  <div id="ghost-hint" class="ghost-hint hidden" role="note">
+    <span><b>Try the ghost view.</b> It shows the rest of the model see-through, so you can watch the print fill it in.</span>
+    <button id="ghost-hint-close" type="button" aria-label="Dismiss tip">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
     </button>
   </div>
   <div id="legend" class="legend hidden"></div>

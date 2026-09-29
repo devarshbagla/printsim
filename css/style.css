@@ -422,3 +422,93 @@ dialog .actions { margin-top: 16px; }
 .speed-row { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); margin-top: 10px; }
 .speed-row input { width: 80px; background: rgba(255,255,255,.06); border: 1px solid var(--line-2); border-radius: 10px; padding: 7px 9px; font-family: var(--display); font-size: 15px; color: var(--text); outline: none; }
 .speed-row input:focus { border-color: var(--accent); }
+
+/* ---------- landing: new-user blurb ---------- */
+.about {
+  margin: 0 0 22px; padding: 18px 18px 16px;
+  border: 1px solid var(--line); border-radius: var(--radius);
+  background: rgba(255,255,255,.03);
+}
+.about h2 { margin: 0 0 8px; font: 600 17px/1.25 var(--display); letter-spacing: -0.01em; }
+.about p { margin: 0 0 14px; font-size: 14.5px; line-height: 1.5; color: #c3c8d0; }
+.about p b { color: var(--text); }
+.perks { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 16px; }
+.perks li { display: flex; flex-direction: column; gap: 2px; font-size: 13px; line-height: 1.4; color: var(--muted); }
+.perks b { color: var(--text); font-size: 13.5px; font-weight: 600; }
+.perks b::before { content: ''; display: inline-block; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); margin: 0 7px 2px 0; }
+.fine.tail { margin: 22px 0 0; }
+@media (max-width: 380px) { .perks { grid-template-columns: 1fr; } }
+
+/* ---------- ghost hint (laptops only; JS also checks) ---------- */
+.ghost-hint {
+  position: fixed; z-index: 6; transform: translate(6px, -50%); opacity: 0;
+  transition: opacity .25s, transform .25s;
+  display: flex; align-items: flex-start; gap: 10px;
+  width: 270px; padding: 11px 10px 11px 14px; border-radius: 14px;
+  background: rgba(30,33,39,.96); border: 1px solid var(--line-2);
+  box-shadow: 0 12px 30px rgba(0,0,0,.4);
+  font-size: 13px; line-height: 1.4; color: #c3c8d0;
+  pointer-events: auto;
+}
+.ghost-hint.in { opacity: 1; transform: translate(0, -50%); }
+.ghost-hint b { color: var(--text); font-weight: 600; }
+.ghost-hint::after {
+  content: ''; position: absolute; right: -6px; top: 50%; width: 10px; height: 10px;
+  background: inherit; border: inherit; border-width: 1px 1px 0 0; transform: translateY(-50%) rotate(45deg);
+}
+.ghost-hint button {
+  flex: none; width: 24px; height: 24px; margin: -3px 0 0; border-radius: 8px; border: 0;
+  display: grid; place-items: center; background: none; color: var(--muted); cursor: pointer;
+}
+.ghost-hint button:hover { color: var(--text); background: rgba(255,255,255,.08); }
+@media (max-width: 899px), (hover: none), (pointer: coarse) { .ghost-hint { display: none !important; } }
+
+/* ---------- phones ---------- */
+/* landing: centre when it fits, scroll from the top when it doesn't */
+.landing { display: flex; place-items: initial; }
+.landing-inner { margin: auto; }
+/* iOS zooms the page when a focused input's text is under 16px */
+.speed-row input { font-size: 16px; }
+@media (pointer: coarse) {
+  .seg button { padding: 9px 12px; }
+  .pill { padding: 9px 13px; }
+  .viewctl button { width: 44px; height: 44px; }
+  .swatch { width: 34px; height: 34px; }
+  .linkbtn { padding: 10px 12px; }
+}
+@media (max-width: 899px) {
+  .landing { padding-top: calc(64px + var(--safe-t)); }
+  .landing h1 { font-size: clamp(30px, 8.6vw, 40px); }
+  .lede { margin-bottom: 20px; font-size: 15.5px; }
+}
+@media (max-width: 899px) and (max-height: 700px) {
+  .landing .eyebrow { margin-bottom: 6px; }
+  .landing h1 { margin-bottom: 10px; }
+  .drop { padding: 18px 16px; }
+}
+/* phone on its side: the bottom sheet would cover the whole view, so it
+   becomes a side card like on laptops */
+@media (orientation: landscape) and (max-height: 520px) {
+  .topbar { padding: calc(8px + var(--safe-t)) max(12px, env(safe-area-inset-right)) 8px max(12px, env(safe-area-inset-left)); }
+  .sheet, body[data-mode="setup"] .sheet {
+    left: max(10px, env(safe-area-inset-left)); right: auto; bottom: 10px; top: 52px;
+    width: min(46vw, 380px); max-height: none;
+    border-radius: 18px; border: 1px solid var(--line-2);
+    padding-bottom: 12px;
+  }
+  .grabber { display: none; }
+  .viewctl { top: 52px; right: max(10px, env(safe-area-inset-right)); gap: 6px; }
+  .viewctl button { width: 38px; height: 38px; }
+  .legend { top: 52px; left: auto; right: 60px; }
+  .landing { padding: 56px 24px 16px; }
+  .landing-inner { max-width: 520px; }
+}
+/* short phones: tighter run panel so the print keeps most of the screen */
+@media (max-width: 899px) and (max-height: 760px) and (orientation: portrait) {
+  #panel-run { gap: 12px; }
+  .pct { font-size: 52px; }
+  .stats { grid-template-columns: 1fr 1fr 1.4fr; gap: 8px; }
+  .stats .wide { grid-column: auto; }
+  .stats > div { padding: 8px 10px; }
+  .stats .v { font-size: 14.5px; }
+}
