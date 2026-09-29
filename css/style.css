@@ -535,3 +535,14 @@ dialog .actions { margin-top: 16px; }
 @media (max-width: 899px) and (max-height: 760px) and (orientation: portrait) {
   .cal-pill { margin-top: 5px; }
 }
+
+/* ---------- timelapse video ---------- */
+.rec-pill { display: inline-flex; align-items: center; gap: 7px; }
+.rec-dot { width: 8px; height: 8px; border-radius: 50%; background: #ff4d4d; flex: none; }
+.rec-pill.recording { color: var(--text); border-color: rgba(255,77,77,.6); background: rgba(255,77,77,.14); }
+.rec-pill.recording .rec-dot { animation: rec-blink 1s ease-in-out infinite; }
+@keyframes rec-blink { 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .rec-pill.recording .rec-dot { animation: none; } }
+#dlg-video { width: min(420px, calc(100vw - 32px)); }
+.video-out { display: block; width: 100%; max-height: 52vh; object-fit: contain; border-radius: 14px; background: #000; margin: 6px 0 8px; }
+.video-meta { margin: 0 0 12px; }

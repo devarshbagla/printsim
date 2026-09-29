@@ -127,6 +127,9 @@
             <button type="button" data-speed="1000">1000×</button>
           </div>
           <button id="btn-layermode" class="pill" type="button" aria-pressed="false" title="Show one finished layer at a time, like a printer timelapse">Layer by layer</button>
+          <button id="btn-rec" class="pill rec-pill hidden" type="button" aria-pressed="false" title="Record the whole print as a short timelapse video">
+            <i class="rec-dot" aria-hidden="true"></i><span id="btn-rec-label">Save as video</span>
+          </button>
         </div>
         <div id="speed-note" class="muted small speed-note"></div>
       </div>
@@ -252,6 +255,21 @@
         <button id="cal-ics" class="btn primary" type="button">Apple / Outlook calendar</button>
         <a id="cal-google" class="btn" target="_blank" rel="noopener">Google Calendar</a>
         <a id="cal-google-swap" class="linkbtn cal-link hidden" target="_blank" rel="noopener">Also add the filament swap to Google</a>
+      </div>
+      <div class="actions">
+        <button value="cancel" class="btn" type="submit">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-video">
+    <form method="dialog">
+      <h3>Your timelapse</h3>
+      <video id="video-out" class="video-out" playsinline muted loop autoplay></video>
+      <p id="video-meta" class="muted small video-meta"></p>
+      <div class="cal-buttons">
+        <button id="video-share" class="btn primary" type="button">Share</button>
+        <a id="video-save" class="btn">Save video</a>
       </div>
       <div class="actions">
         <button value="cancel" class="btn" type="submit">Close</button>

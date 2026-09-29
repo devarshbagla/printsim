@@ -459,6 +459,7 @@ export class PrintView {
     if (this.dirty) {
       this.renderer.render(this.scene, this.camera);
       this.dirty = false;
+      if (this.onRendered) this.onRendered(); // same task: the WebGL buffer is still readable
     }
   }
 }

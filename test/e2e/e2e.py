@@ -180,6 +180,44 @@ def main():
         check('iOS calendar flow: no JS errors', not errors, '; '.join(errors)[:300])
         ctx.close()
 
+        # ---- timelapse video: records real frames, cancels cleanly ----
+        errors = []
+        ctx, page = new_page(browser, url, 360, 640, errors)
+        load_sample(page, 'mushroom-no-supports.gcode')
+        if page.is_visible('#btn-rec'):
+            page.evaluate('window.__printsim.recSeconds = 2')
+            page.click('#btn-rec')
+            check('recording shows a cancel label', 'cancel' in page.inner_text('#btn-rec-label'))
+            page.fill('#scrub', '400')
+            page.dispatch_event('#scrub', 'input')
+            check('touching the scrubber cancels the recording', page.inner_text('#btn-rec-label') == 'Save as video' and page.input_value('#scrub') == '400')
+            page.wait_for_timeout(500)
+            check('a cancelled recording opens no video', not page.evaluate("document.getElementById('dlg-video').open"))
+            page.click('#btn-rec')
+            page.wait_for_selector('#dlg-video[open]', timeout=300_000)
+            page.wait_for_function("document.getElementById('video-out').readyState >= 2", timeout=60_000)
+            mean = page.evaluate("""() => {
+              const v = document.getElementById('video-out'), c = document.createElement('canvas');
+              c.width = v.videoWidth; c.height = v.videoHeight;
+              const g = c.getContext('2d'); g.drawImage(v, 0, 0);
+              const d = g.getImageData(0, 0, c.width, c.height).data; let s = 0, n = 0;
+              for (let i = 0; i < d.length; i += 4 * 61) { s += d[i] + d[i + 1] + d[i + 2]; n++; }
+              return s / n / 3;
+            }""")
+            check('video has real frames (not black)', mean > 20, f'mean brightness {mean:.0f}')
+            shot(page, '360x640-video-dialog')
+            with page.expect_download() as dl:
+                page.click('#video-save')
+            d = dl.value
+            size = pathlib.Path(d.path()).stat().st_size
+            check('video saves with the file name', re.fullmatch(r'printsim-mushroom-no-supports\.(mp4|webm)', d.suggested_filename) is not None and size > 10_000, f'{d.suggested_filename} {size} B')
+            page.click('#dlg-video button[value=cancel]')
+            check('view restored after recording', page.inner_text('#btn-rec-label') == 'Save as video' and page.input_value('#scrub') == '1000' and not page.evaluate('window.__printsim.recording'))
+        else:
+            print('SKIP  this Chromium cannot record video')
+        check('timelapse video: no JS errors', not errors, '; '.join(errors)[:300])
+        ctx.close()
+
         # ---- support check + laptop layout ----
         errors = []
         ctx, page = new_page(browser, url, 1280, 780, errors)

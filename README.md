@@ -15,7 +15,9 @@ It's a simulation, not a camera. If the real print fails, printsim will happily 
 - **Timelapse preview** before you print: play the whole thing at 10×, 50×, 200× or 1000×, or **layer by layer** like a printer camera timelapse.
 - **The printer, printing**: a MINI-layout printer model (single Z column, gantry, hotend, sliding bed with a textured sheet, live front screen, Bowden tube) that moves exactly like a bed-slinger: the bed carries your print back and forth in Y, the head runs in X, the gantry climbs in Z. Rotate, pan, zoom. Toggle it off for a close-up of just the print.
 - **Material-aware physics**: filament type is read from the file (PLA, PETG, ABS, ASA, PC, nylon, TPU, PVA) and can be overridden. PLA gets special treatment: its overhang and bridge limits follow the part-cooling fan speed at every moment of the print (from `M106`/`M107`), and printing it too hot costs you. Bridges that hold still sag a bit, more for PETG and TPU.
-- **"Forgot supports?" physics**: printsim rebuilds what's under every strand. Parts printed in mid-air get flagged before you print, and in the sim they droop, fall and pile up as spaghetti (and so does everything printed on top of them). Try the *"one that forgot its supports"* sample.
+- **"Forgot supports?" physics**: printsim rebuilds what's under every strand. Parts printed in mid-air get flagged before you print, with when it goes wrong ("about 4m 08s in, layer 61") and how much plastic that costs, and in the sim they droop, fall and pile up as spaghetti (and so does everything printed on top of them). Try the *"one that forgot its supports"* sample.
+- **Save as video**: records the whole print as a ~12 second timelapse with a slow orbit, a caption and a progress bar, then share or save it (MP4 where the browser can, WebM otherwise).
+- **Remind me**: adds the finish time and any filament swaps to your calendar with alerts, so your phone buzzes with printsim closed (Apple Calendar / Outlook via `.ics`, Google Calendar via its add-event link).
 - **Realistic timing**
   - Motion time is anchored to the slicer's own `M73` progress markers, so the % on screen matches the % on the printer.
   - Warm-up is simulated from the temps you type in (nozzle + bed heating, homing, mesh bed leveling).
@@ -94,13 +96,16 @@ js/materials.js       filament profiles (PLA focus) + detection
 js/printer3d.js       the printer model and its kinematics
 js/store.js           IndexedDB session + calibration
 js/parser.worker.js   parsing off the main thread
+js/report.js          spaghetti report: when it fails, grams at stake
+js/ics.js             calendar reminders (.ics + Google link)
+js/recorder.js        timelapse video export (MediaRecorder)
+test/                 Node checks (ci-check.mjs is the CI gate) + Playwright e2e
 samples/              demo files (tools/make_sample.py, tools/make_overhang_tests.py)
 vendor/               three.js r170 + OrbitControls, RoomEnvironment, RoundedBoxGeometry (MIT)
 ```
 
 ## Roadmap
 
-- v2: a virtual printer in the scene doing the printing
 - More printer profiles (MK4/MK4S, Core One, Bambu), `.gcode.3mf`
 - Hand off a running print from laptop to phone
 - Optional network sync for printers that expose one (PrusaLink, Moonraker, OctoPrint)

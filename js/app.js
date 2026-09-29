@@ -7,6 +7,7 @@ import { simulatePhysics } from './physics.js';
 import { idbGet, idbSet, idbDel, lsGet, lsSet, getCalibration, addCalibration } from './store.js';
 import { planEvents, buildIcs, googleCalendarUrl } from './ics.js';
 import { spaghettiReport, fmtGrams } from './report.js';
+import { TimelapseRecorder, recordingType } from './recorder.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -231,7 +232,7 @@ function setMode(m) {
   view.controls.autoRotate = m === 'empty' || m === 'done';
   view.controls.autoRotateSpeed = 0.7;
   updateLegend();
-  if (m !== 'setup') setPlaying(false);
+  if (m !== 'setup') { cancelRecording(); setPlaying(false); }
   if (m === 'setup') applyScrub();
   view.setGhost(ghostOn());
   if (m === 'run') { view.setWarnTint(0); view.setPhysics(prefs.physics); scheduleGhostHint(); } else hideGhostHint();
@@ -321,6 +322,8 @@ function updateSetupEstimate() {
 // ---------------------------------------------------------------- timelapse preview
 const preview = { t: null, playing: false, lastWall: 0 };
 const printSpan = () => Math.max(tl.total - tl.startupEnd, 1);
+let rec = null; // timelapse video being recorded (see "timelapse video" below)
+const playSpeed = () => (rec ? rec.speed : prefs.speed);
 
 function applyScrub() {
   if (!parsed || !tl) return;
@@ -342,7 +345,7 @@ function renderPreview() {
     return;
   }
   const st = stateAt(parsed, tl, preview.t);
-  const speed = preview.playing ? prefs.speed : 1;
+  const speed = preview.playing ? playSpeed() : 1;
   view.setWarnTint(0);
   view.setSimTime(preview.t, Math.max(0.8, 0.8 * speed));
   if (prefs.layerMode) {
@@ -352,7 +355,7 @@ function renderPreview() {
     view.setHead(st.segHead, st.head, true, true);
   }
   $('scrub-label').textContent = `Layer ${st.layer + 1}/${st.layerCount} · ${Math.floor(st.percent)}% · ${fmtDur(preview.t - tl.startupEnd)} in`;
-  view.setScreen({ title: 'preview', big: `${Math.floor(st.percent)}%`, line1: `${prefs.speed}× timelapse`, line2: `Layer ${st.layer + 1}/${st.layerCount}`, progress: st.percent / 100, accent: accentHex() });
+  view.setScreen({ title: 'preview', big: `${Math.floor(st.percent)}%`, line1: `${Math.round(playSpeed())}× timelapse`, line2: `Layer ${st.layer + 1}/${st.layerCount}`, progress: st.percent / 100, accent: accentHex() });
 }
 
 function setPlaying(on) {
@@ -369,10 +372,11 @@ function tickPreview() {
   const w = performance.now();
   const dt = Math.min((w - preview.lastWall) / 1000, 0.25);
   preview.lastWall = w;
-  preview.t += dt * prefs.speed;
+  preview.t += dt * playSpeed();
   if (preview.t >= tl.total) {
     preview.t = tl.total;
-    setPlaying(false);
+    // a recording holds on the finished model for a moment before it ends
+    if (rec) { if (!rec.endAt) rec.endAt = w + REC_HOLD_MS; } else setPlaying(false);
   }
   $('scrub').value = Math.min(999, Math.round(((preview.t - tl.startupEnd) / printSpan()) * 1000));
   renderPreview();
@@ -784,6 +788,137 @@ function downloadIcs() {
   toast('Calendar file downloaded. Open it to add the reminders.', 3600);
 }
 
+// ---------------------------------------------------------------- timelapse video
+// Plays the whole print as a ~12 s timelapse while recording the part of the
+// screen the model is framed in, with a slow orbit, then offers the video to
+// share or save. Everything stays on the device.
+const REC_SECONDS = 12, REC_HOLD_MS = 1600;
+
+function recordingCrop() {
+  const c = $('view');
+  const ratio = c.width / Math.max(c.clientWidth, 1);
+  const x = Math.round(view.insets.left * ratio);
+  const h = Math.round(c.height - view.insets.bottom * ratio);
+  return { x, y: 0, w: c.width - x, h };
+}
+
+function startRecording() {
+  if (rec || !tl || mode !== 'setup') return;
+  const crop = recordingCrop();
+  if (crop.w < 120 || crop.h < 120) { toast('Not enough of the 3D view is showing to record it.'); return; }
+  let r;
+  try {
+    r = new TimelapseRecorder($('view'), crop, { title: file.name.replace(/\.(b?gcode|gcode\.3mf)$/i, ''), accent: accentHex() });
+  } catch (e) {
+    toast("This browser can't record video.");
+    return;
+  }
+  rec = {
+    r, speed: Math.min(Math.max(printSpan() / (window.__printsim.recSeconds || REC_SECONDS), 10), 50000), endAt: null,
+    rotate: view.controls.autoRotate, rotateSpeed: view.controls.autoRotateSpeed,
+  };
+  view.controls.autoRotate = true;
+  view.controls.autoRotateSpeed = 1.6;
+  view.onRendered = () => {
+    if (!rec) return;
+    const st = stateAt(parsed, tl, preview.t ?? tl.total);
+    rec.r.info = {
+      pct: st.percent,
+      line: `Layer ${st.layer + 1}/${st.layerCount} · ${fmtDur(Math.max(0, (preview.t ?? tl.total) - tl.startupEnd))} of ${fmtDur(printSpan())}`,
+    };
+    rec.r.draw();
+  };
+  setPlaying(false);
+  preview.t = tl.startupEnd;
+  $('scrub').value = 0;
+  try {
+    rec.r.start();
+  } catch (e) {
+    endRecording();
+    toast("This browser can't record video.");
+    return;
+  }
+  setPlaying(true);
+  const b = $('btn-rec');
+  b.classList.add('recording');
+  b.setAttribute('aria-pressed', 'true');
+  $('btn-rec-label').textContent = 'Recording… tap to cancel';
+}
+
+// put the view back the way it was
+function endRecording() {
+  if (!rec) return null;
+  const r = rec.r;
+  view.onRendered = null;
+  view.controls.autoRotate = rec.rotate;
+  view.controls.autoRotateSpeed = rec.rotateSpeed;
+  rec = null;
+  const b = $('btn-rec');
+  b.classList.remove('recording');
+  b.setAttribute('aria-pressed', 'false');
+  $('btn-rec-label').textContent = 'Save as video';
+  return r;
+}
+
+// reset: go back to the full model (skip it when the user just grabbed the
+// scrubber or play button, their own handler decides what shows next)
+function cancelRecording({ reset = false, say = false } = {}) {
+  const r = endRecording();
+  if (!r) return;
+  r.cancel();
+  if (reset && mode === 'setup') { setPlaying(false); $('scrub').value = 1000; applyScrub(); }
+  if (say) toast('Recording cancelled');
+}
+
+let videoUrl = null, videoFile = null;
+async function finishRecording() {
+  const r = endRecording();
+  if (!r) return;
+  setPlaying(false);
+  $('scrub').value = 1000;
+  applyScrub();
+  try {
+    const blob = await r.stop();
+    const base = file ? file.name.replace(/\.(b?gcode|gcode\.3mf)$/i, '').replace(/[^\w.-]+/g, '_').slice(0, 60) : 'print';
+    videoFile = new File([blob], `printsim-${base}.${r.extension}`, { type: blob.type });
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
+    videoUrl = URL.createObjectURL(videoFile);
+    const v = $('video-out');
+    v.src = videoUrl;
+    $('video-save').href = videoUrl;
+    $('video-save').download = videoFile.name;
+    $('video-meta').textContent = `${r.extension.toUpperCase()} · ${(blob.size / 1e6).toFixed(1)} MB · ${r.out.width}×${r.out.height}`;
+    let canShare = false;
+    try { canShare = !!(navigator.canShare && navigator.canShare({ files: [videoFile] })); } catch (e) { /* no */ }
+    show('video-share', canShare);
+    $('video-save').classList.toggle('primary', !canShare);
+    $('dlg-video').showModal();
+    v.play().catch(() => {});
+  } catch (e) {
+    toast(`Couldn't make the video: ${e.message}`, 4200);
+  }
+}
+
+async function shareVideo() {
+  if (!videoFile) return;
+  try {
+    await navigator.share({ files: [videoFile], title: 'printsim timelapse' });
+  } catch (e) {
+    if (e && e.name !== 'AbortError') toast("Sharing didn't work here. Use Save video instead.", 3600);
+  }
+}
+
+function closeVideo() {
+  const v = $('video-out');
+  v.pause();
+  v.removeAttribute('src');
+  v.load();
+  // keep the blob URL a moment in case a save is still in flight
+  const u = videoUrl;
+  videoUrl = null;
+  if (u) setTimeout(() => URL.revokeObjectURL(u), 30000);
+}
+
 // ---------------------------------------------------------------- dialogs
 function confirmBox(title, text, okLabel = 'OK') {
   return new Promise((resolve) => {
@@ -871,8 +1006,11 @@ function wire() {
   };
   $('t-noz').addEventListener('input', tempChange);
   $('t-bed').addEventListener('input', tempChange);
-  $('scrub').addEventListener('input', () => { if (preview.playing) setPlaying(false); applyScrub(); });
-  $('btn-play').onclick = () => setPlaying(!preview.playing);
+  $('scrub').addEventListener('input', () => { cancelRecording(); if (preview.playing) setPlaying(false); applyScrub(); });
+  $('btn-play').onclick = () => { cancelRecording(); setPlaying(!preview.playing); };
+  $('btn-rec').onclick = () => (rec ? cancelRecording({ reset: true, say: true }) : startRecording());
+  $('video-share').onclick = shareVideo;
+  $('dlg-video').addEventListener('close', closeVideo);
   for (const b of document.querySelectorAll('#speeds [data-speed]')) {
     b.setAttribute('role', 'radio');
     b.onclick = () => { prefs.speed = +b.dataset.speed; savePrefs(); updateSpeedNote(); };
@@ -924,6 +1062,7 @@ function wire() {
   $('wake').onchange = (e) => setWake(e.target.checked);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'hidden' && parsed && mode !== 'empty') saveSession();
+    if (document.visibilityState === 'hidden' && rec) { cancelRecording({ reset: true }); toast('Recording stopped: printsim went to the background.', 3600); }
     if (document.visibilityState === 'visible') {
       lastUi = 0;
       if ($('wake').checked) setWake(true);
@@ -993,6 +1132,10 @@ function trackInsets() {
 function frame() {
   trackInsets();
   tickPreview();
+  if (rec) {
+    view.dirty = true; // every frame goes into the video, even when nothing moved
+    if (rec.endAt && performance.now() >= rec.endAt) finishRecording();
+  }
   if (mode !== 'run' || !run || !tl) return;
   const t = now();
   checkAutoPause(t);
@@ -1009,6 +1152,7 @@ async function init() {
   $('vc-printer').setAttribute('aria-pressed', prefs.printerView);
   setAccent(prefs.color || '#ff7a1a');
   wire();
+  show('btn-rec', !!recordingType());
   updateSpeedNote();
   setMode('empty');
 
@@ -1024,10 +1168,13 @@ async function init() {
 }
 
 // Handy for debugging from the console: __printsim.skip(600) jumps 10 min ahead.
+// __printsim.recSeconds = 2 makes "Save as video" record a 2 s timelapse (tests).
 window.__printsim = {
+  recSeconds: 0,
   skip(sec) { if (run) { run.anchorWall -= sec * 1000; if (run.startedWall) run.startedWall -= sec * 1000; if (run.extrudeWall) run.extrudeWall -= sec * 1000; lastUi = 0; } },
   get timeline() { return tl; },
   get run() { return run; },
+  get recording() { return !!rec; },
 };
 
 init();
