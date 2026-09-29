@@ -100,5 +100,44 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   }
 }
 
+// ---- service worker: every module is precached, or the app won't boot offline ----
+{
+  const { readdirSync, existsSync } = await import('node:fs');
+  const sw = readFileSync(`${here}sw.js`, 'utf8');
+  const core = [...sw.match(/const CORE = \[([\s\S]*?)\];/)[1].matchAll(/'([^']+)'/g)].map(m => m[1]);
+  const need = [...readdirSync(`${here}js`).map(f => `js/${f}`), ...readdirSync(`${here}vendor`).filter(f => f.endsWith('.js')).map(f => `vendor/${f}`)];
+  const missing = need.filter(f => !core.includes(f));
+  check('service worker precaches every js/ and vendor/ module', !missing.length, missing.join(', '));
+  const dead = core.filter(f => f !== './' && !existsSync(`${here}${f}`));
+  check('service worker precache list has no missing files', !dead.length, dead.join(', '));
+}
+
+// ---- calendar reminders (js/ics.js) ----
+{
+  const { planEvents, buildIcs, googleCalendarUrl, foldLine, icsText } = await import('../js/ics.js');
+  const nowMs = Date.UTC(2026, 8, 29, 4, 0, 0);
+  const ev = planEvents({ nowMs, simNow: 600, total: 4200, pauses: [{ t: 300, type: 'filament' }, { t: 1800, type: 'filament' }, { t: 3000, type: 'pause' }], name: 'cube, v2; final.bgcode', printer: 'Prusa MINI+' });
+  check('ics: past stops skipped, future stops + finish kept, in order', ev.map(e => e.kind).join() === 'filament,pause,finish');
+  check('ics: times are wall clock from now', ev[0].start === nowMs + 1200e3 && ev[2].start === nowMs + 3600e3);
+  check('ics: file extension dropped from titles', ev[2].title === 'Print done: cube, v2; final');
+  const ics = buildIcs(ev, { nowMs, uidSeed: 'x' });
+  const lines = ics.split('\r\n');
+  check('ics: CRLF line endings only', !/[^\r]\n/.test(ics) && ics.endsWith('\r\n'));
+  check('ics: every line is 75 octets or less', lines.every(l => new TextEncoder().encode(l).length <= 75));
+  check('ics: 3 events, 6 alarms, balanced blocks',
+    (ics.match(/BEGIN:VEVENT/g) || []).length === 3 && (ics.match(/BEGIN:VALARM/g) || []).length === 6 && (ics.match(/END:VALARM/g) || []).length === 6);
+  check('ics: UTC start time', ics.includes('DTSTART:20260929T050000Z'));
+  check('ics: commas and semicolons escaped', ics.includes('SUMMARY:Print done: cube\\, v2\\; final'));
+  check('ics: finish alarms 10 min before and on time', /TRIGGER:-PT10M[\s\S]*TRIGGER:PT0M\r\nEND:VALARM\r\nEND:VEVENT\r\nEND:VCALENDAR/.test(ics));
+  const unfolded = ics.replace(/\r\n /g, '');
+  check('ics: folding round-trips', unfolded.includes(`DESCRIPTION:${icsText(ev[2].description)}`));
+  const multi = foldLine('X:' + 'é'.repeat(100));
+  check('ics: folding never splits a UTF-8 character', !multi.includes('�') && multi.replace(/\r\n /g, '') === 'X:' + 'é'.repeat(100));
+  const g = new URL(googleCalendarUrl(ev[2]));
+  check('ics: Google link carries title and UTC dates',
+    g.hostname === 'calendar.google.com' && g.searchParams.get('action') === 'TEMPLATE' &&
+    g.searchParams.get('dates') === '20260929T050000Z/20260929T051500Z' && g.searchParams.get('text') === ev[2].title);
+}
+
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

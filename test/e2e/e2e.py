@@ -1,0 +1,199 @@
+"""Browser end-to-end checks for printsim (headless Chromium via Playwright).
+
+    pip install playwright && python -m playwright install chromium
+    python test/e2e/e2e.py [--shots DIR]
+
+Serves the repo on a local port, then drives the app at phone and laptop sizes.
+Headless Chromium renders WebGL in software (SwiftShader), about 1 fps at laptop
+size, so viewports are small and timeouts long. window.__printsim.skip(sec)
+jumps the run clock.
+"""
+import argparse, functools, http.server, os, pathlib, re, socketserver, sys, threading, urllib.parse
+
+from playwright.sync_api import sync_playwright
+
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+ARGS = ['--use-gl=angle', '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist']
+IPHONE_UA = ('Mozilla/5.0 (iPhone; CPU iPhone OS 18_5 like Mac OS X) AppleWebKit/605.1.15 '
+             '(KHTML, like Gecko) Version/18.5 Mobile/15E148 Safari/604.1')
+PHONES = [(390, 844), (360, 640), (844, 390)]
+
+failures = 0
+
+
+def check(name, ok, detail=''):
+    global failures
+    print(f"{'PASS' if ok else 'FAIL'}  {name}{f'  ({detail})' if detail else ''}", flush=True)
+    if not ok:
+        failures += 1
+
+
+def serve():
+    class Quiet(http.server.SimpleHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+    handler = functools.partial(Quiet, directory=str(ROOT))
+    httpd = socketserver.ThreadingTCPServer(('127.0.0.1', 0), handler)
+    httpd.daemon_threads = True
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f'http://127.0.0.1:{httpd.server_address[1]}/'
+
+
+def with_filament_change():
+    """The vase sample with an M600 halfway through, to exercise swap reminders."""
+    lines = (ROOT / 'samples/twisted-vase.gcode').read_text().split('\n')
+    layer_lines = [i for i, l in enumerate(lines) if l.startswith(';LAYER_CHANGE')]
+    at = layer_lines[len(layer_lines) // 2]
+    return '\n'.join(lines[:at] + ['M600'] + lines[at:]).encode()
+
+
+def new_page(browser, url, w, h, errors, **ctx):
+    touch = w < 900 or h < 560
+    context = browser.new_context(viewport={'width': w, 'height': h}, device_scale_factor=1,
+                                  is_mobile=touch, has_touch=touch, accept_downloads=True, **ctx)
+    page = context.new_page()
+    page.set_default_timeout(90_000)
+    page.on('pageerror', lambda e: errors.append(str(e)))
+    page.on('console', lambda m: m.type == 'error' and 'data URL' not in m.text and errors.append(m.text))
+    page.goto(url)
+    page.wait_for_selector('#landing:not(.hidden)')
+    return context, page
+
+
+def overflow(page):
+    return page.evaluate('document.documentElement.scrollWidth - window.innerWidth')
+
+
+def load_sample(page, name):
+    page.click(f'[data-sample="{name}"]')
+    page.wait_for_selector('#panel-setup:not(.hidden)')
+    page.wait_for_selector('#loading.hidden', state='attached')
+
+
+def load_bytes(page, name, data):
+    page.set_input_files('#file', files=[{'name': name, 'mimeType': 'text/plain', 'buffer': data}])
+    page.wait_for_selector('#panel-setup:not(.hidden)')
+    page.wait_for_selector('#loading.hidden', state='attached')
+
+
+def start(page):
+    page.click('#btn-start')
+    page.wait_for_selector('#panel-run:not(.hidden)')
+    page.wait_for_function("document.getElementById('remain').textContent.includes('left')")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--shots', help='folder for screenshots')
+    a = ap.parse_args()
+    shots = pathlib.Path(a.shots) if a.shots else None
+    if shots:
+        shots.mkdir(parents=True, exist_ok=True)
+    shot = lambda page, n: shots and page.screenshot(path=str(shots / f'{n}.png'))
+
+    httpd, url = serve()
+    with sync_playwright() as p:
+        browser = p.chromium.launch(args=ARGS)
+
+        # ---- phone sizes: landing, setup, run, no sideways scrolling ----
+        for w, h in PHONES:
+            errors = []
+            ctx, page = new_page(browser, url, w, h, errors)
+            tag = f'{w}x{h}'
+            check(f'{tag} landing fits the width', overflow(page) <= 0, f'{overflow(page)}px over')
+            shot(page, f'{tag}-landing')
+            load_sample(page, 'twisted-vase.gcode')
+            check(f'{tag} setup fits the width', overflow(page) <= 0)
+            check(f'{tag} vase shows no spaghetti warning', page.is_hidden('#support-warn'))
+            shot(page, f'{tag}-setup')
+            start(page)
+            check(f'{tag} run fits the width', overflow(page) <= 0)
+            check(f'{tag} Remind me button visible while printing', page.is_visible('#btn-cal'))
+            box = page.locator('#btn-cal').bounding_box()
+            check(f'{tag} Remind me button is on screen', box and box['x'] >= 0 and box['x'] + box['width'] <= w and box['y'] + box['height'] <= h,
+                  str({k: round(v) for k, v in (box or {}).items()}))
+            shot(page, f'{tag}-run')
+            check(f'{tag} no JS errors', not errors, '; '.join(errors)[:300])
+            ctx.close()
+
+        # ---- calendar flow: laptop download, iOS data: navigation, filament swap ----
+        errors = []
+        ctx, page = new_page(browser, url, 1280, 780, errors)
+        load_bytes(page, 'vase-with-swap.gcode', with_filament_change())
+        start(page)
+        page.click('#btn-cal')
+        page.wait_for_selector('#dlg-cal[open]')
+        items = page.locator('#cal-list li').all_inner_texts()
+        check('calendar dialog lists the swap then the finish', len(items) == 2 and items[0].startswith('Filament swap') and items[1].startswith('Print done'), str(items))
+        g = urllib.parse.urlparse(page.get_attribute('#cal-google', 'href'))
+        q = urllib.parse.parse_qs(g.query)
+        check('Google link: calendar.google.com template with UTC dates',
+              g.netloc == 'calendar.google.com' and q.get('action') == ['TEMPLATE'] and re.fullmatch(r'\d{8}T\d{6}Z/\d{8}T\d{6}Z', q['dates'][0]) is not None)
+        check('Google swap link shown when the file has a swap', page.is_visible('#cal-google-swap'))
+        shot(page, 'laptop-calendar-dialog')
+        with page.expect_download() as dl:
+            page.click('#cal-ics')
+        d = dl.value
+        text = pathlib.Path(d.path()).read_text()
+        check('ics download named after the file', d.suggested_filename == 'printsim-vase-with-swap.ics', d.suggested_filename)
+        check('ics download has 2 events with alarms', text.count('BEGIN:VEVENT') == 2 and text.count('BEGIN:VALARM') == 4)
+        page.wait_for_selector('#dlg-cal:not([open])', state='attached')
+        check('dialog closes after download', not page.evaluate("document.getElementById('dlg-cal').open"))
+        # the swap: clock auto-pauses, reminders then assume it resumes now
+        page.evaluate('window.__printsim.skip(3 * 3600)')
+        page.wait_for_function("document.getElementById('btn-pause').textContent === 'Resume'")
+        page.click('#btn-cal')
+        page.wait_for_selector('#dlg-cal[open]')
+        items = page.locator('#cal-list li').all_inner_texts()
+        check('after the swap only the finish is left', len(items) == 1 and items[0].startswith('Print done'), str(items))
+        check('paused clock is called out', 'paused' in page.inner_text('#cal-note'))
+        check('no swap link once the swap is behind us', page.is_hidden('#cal-google-swap'))
+        page.click('#dlg-cal button[value=cancel]')
+        # end of print: button goes away
+        page.click('#btn-pause')
+        page.evaluate('window.__printsim.skip(48 * 3600)')
+        page.wait_for_function("document.getElementById('remain').textContent.includes('Done') || document.getElementById('remain').textContent.includes('over')")
+        page.wait_for_timeout(600)
+        check('Remind me hidden once the print should be done', page.is_hidden('#btn-cal'))
+        check('laptop calendar flow: no JS errors', not errors, '; '.join(errors)[:300])
+        ctx.close()
+
+        errors = []
+        ctx, page = new_page(browser, url, 390, 844, errors, user_agent=IPHONE_UA)
+        load_sample(page, 'twisted-vase.gcode')
+        start(page)
+        page.click('#btn-cal')
+        page.wait_for_selector('#dlg-cal[open]')
+        shot(page, '390x844-calendar-dialog')
+        # iOS Safari opens its Add to Calendar sheet for this navigation; Chromium
+        # turns a non-renderable data: URL into a download, which proves the iOS
+        # path was taken (a direct navigation, not a blob download link)
+        with page.expect_download() as dl:
+            page.evaluate("document.getElementById('cal-ics').click()")
+        d = dl.value
+        body = pathlib.Path(d.path()).read_text()
+        check('iOS path navigates straight to a text/calendar data URL', d.url.startswith('data:text/calendar'), d.url[:40])
+        check('iOS calendar data is a full calendar', body.startswith('BEGIN:VCALENDAR') and 'BEGIN:VALARM' in body)
+        page.goto(url)
+        page.wait_for_selector('#panel-run:not(.hidden)')
+        check('iOS: the run survives leaving and coming back', page.is_visible('#btn-cal'))
+        check('iOS calendar flow: no JS errors', not errors, '; '.join(errors)[:300])
+        ctx.close()
+
+        # ---- support check + laptop layout ----
+        errors = []
+        ctx, page = new_page(browser, url, 1280, 780, errors)
+        load_sample(page, 'mushroom-no-supports.gcode')
+        check('mushroom shows the spaghetti warning', page.is_visible('#support-warn'))
+        shot(page, 'laptop-mushroom')
+        check('laptop mushroom: no JS errors', not errors, '; '.join(errors)[:300])
+        ctx.close()
+
+        browser.close()
+    httpd.shutdown()
+    print(f'\n{failures} check(s) failed' if failures else '\nall checks passed')
+    sys.exit(1 if failures else 0)
+
+
+if __name__ == '__main__':
+    main()

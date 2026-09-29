@@ -5,6 +5,7 @@ import { PRINTERS, AMBIENT, guessPrinter } from './printers.js';
 import { MATERIALS } from './materials.js';
 import { simulatePhysics } from './physics.js';
 import { idbGet, idbSet, idbDel, lsGet, lsSet, getCalibration, addCalibration } from './store.js';
+import { planEvents, buildIcs, googleCalendarUrl } from './ics.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -595,6 +596,7 @@ function updateRunUI(t) {
   }
 
   $('st-layer').textContent = `${st.layer + 1} / ${st.layerCount}`;
+  show('btn-cal', !ended && remaining > 60);
   $('st-z').textContent = st.startup ? '—' : `${st.z.toFixed(2)} mm`;
   let now_ = st.phase;
   if (!now_) {
@@ -692,6 +694,75 @@ async function setWake(on) {
     $('wake').checked = false;
     toast("This browser won't keep the screen on.");
   }
+}
+
+// ---------------------------------------------------------------- calendar reminders
+// The printers aren't networked and there's no server, so the phone's own
+// calendar does the pinging. See js/ics.js for why each export gets new UIDs.
+const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+const CAL_LABEL = { finish: 'Print done', filament: 'Filament swap', pause: 'Print pauses' };
+
+function calendarEvents() {
+  const t = now();
+  const printer = PRINTERS[setup.printerId];
+  return planEvents({
+    nowMs: t, simNow: simNow(t), total: tl.total, pauses: tl.pauses,
+    name: file.name, printer: printer ? printer.name : '', url: location.origin + location.pathname,
+  });
+}
+
+function calClock(ms) {
+  const d = new Date(ms), today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  return sameDay ? clock(ms) : d.toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+}
+
+function openCalendar() {
+  if (!run || !tl) return;
+  const evs = calendarEvents();
+  const list = $('cal-list');
+  list.textContent = '';
+  for (const e of evs) {
+    const li = document.createElement('li');
+    const b = document.createElement('b'), s = document.createElement('span');
+    b.textContent = CAL_LABEL[e.kind] || 'Reminder';
+    s.textContent = calClock(e.start);
+    li.append(b, s);
+    list.appendChild(li);
+  }
+  const notes = [];
+  if (!run.running) notes.push('The clock is paused, so these times assume it resumes right now.');
+  notes.push('Resync later? Add it again and delete the old events.');
+  $('cal-note').textContent = notes.join(' ');
+  const finish = evs[evs.length - 1], swap = evs.find(e => e.kind === 'filament');
+  $('cal-google').href = googleCalendarUrl(finish);
+  show('cal-google-swap', !!swap);
+  if (swap) $('cal-google-swap').href = googleCalendarUrl(swap);
+  const d = $('dlg-cal');
+  d.returnValue = '';
+  d.showModal();
+}
+
+function downloadIcs() {
+  const t = now();
+  const text = buildIcs(calendarEvents(), { nowMs: t, uidSeed: `${run.startedWall}-${t}` });
+  if (isIOS()) {
+    // iOS only offers "Add to Calendar" for a direct navigation to text/calendar;
+    // the Share Sheet and <a download> both end in a plain text preview.
+    saveSession();
+    location.href = `data:text/calendar;charset=utf-8,${encodeURIComponent(text)}`;
+    return;
+  }
+  const url = URL.createObjectURL(new Blob([text], { type: 'text/calendar;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `printsim-${file.name.replace(/\.(b?gcode|gcode\.3mf)$/i, '').replace(/[^\w.-]+/g, '_').slice(0, 60)}.ics`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  $('dlg-cal').close();
+  toast('Calendar file downloaded. Open it to add the reminders.', 3600);
 }
 
 // ---------------------------------------------------------------- dialogs
@@ -814,6 +885,9 @@ function wire() {
     $('btn-more').setAttribute('aria-expanded', open);
   };
   $('btn-finished').onclick = printerFinished;
+  $('btn-cal').onclick = openCalendar;
+  $('cal-ics').onclick = downloadIcs;
+  $('cal-google').addEventListener('click', () => setTimeout(() => $('dlg-cal').close(), 100));
   $('btn-stop').onclick = async () => {
     if (await confirmBox('End this print?', 'The sim stops and you go back to setup. The file stays loaded.', 'End print')) {
       run = null;

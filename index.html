@@ -173,6 +173,10 @@
         <div class="hero-right">
           <div id="remain" class="remain">—</div>
           <div id="eta" class="muted small">—</div>
+          <button id="btn-cal" class="pill cal-pill" type="button">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+            Remind me
+          </button>
         </div>
       </div>
       <div class="progress" aria-hidden="true"><i id="bar"></i></div>
@@ -234,6 +238,23 @@
       <div class="actions">
         <button value="cancel" class="btn" type="submit">Cancel</button>
         <button value="ok" class="btn primary" id="confirm-ok" type="submit">OK</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-cal">
+    <form method="dialog">
+      <h3>Get pinged when it's done</h3>
+      <p class="muted small">Adds calendar events with alerts, so your phone buzzes even with printsim closed.</p>
+      <ul id="cal-list" class="cal-list"></ul>
+      <p id="cal-note" class="muted small cal-note"></p>
+      <div class="cal-buttons">
+        <button id="cal-ics" class="btn primary" type="button">Apple / Outlook calendar</button>
+        <a id="cal-google" class="btn" target="_blank" rel="noopener">Google Calendar</a>
+        <a id="cal-google-swap" class="linkbtn cal-link hidden" target="_blank" rel="noopener">Also add the filament swap to Google</a>
+      </div>
+      <div class="actions">
+        <button value="cancel" class="btn" type="submit">Close</button>
       </div>
     </form>
   </dialog>

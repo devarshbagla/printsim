@@ -512,3 +512,26 @@ dialog .actions { margin-top: 16px; }
   .stats > div { padding: 8px 10px; }
   .stats .v { font-size: 14.5px; }
 }
+
+/* ---------- calendar reminders ---------- */
+.cal-pill { display: inline-flex; align-items: center; gap: 6px; margin-top: 8px; padding: 5px 10px; font-size: 12.5px; }
+.cal-pill svg { flex: none; }
+@media (pointer: coarse) { .cal-pill { padding: 7px 11px; } }
+.cal-list { list-style: none; margin: 0 0 12px; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.cal-list li {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 12px;
+  padding: 10px 12px; border-radius: 12px;
+  background: rgba(255,255,255,.04); border: 1px solid var(--line);
+  font-size: 14px;
+}
+.cal-list li b { font-weight: 600; }
+.cal-list li span { font-family: var(--display); font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.cal-note:empty { display: none; }
+.cal-buttons { display: flex; flex-direction: column; gap: 8px; }
+.cal-buttons .btn { text-align: center; text-decoration: none; color: inherit; }
+.cal-buttons .btn.primary { color: var(--accent-ink); }
+.cal-link { align-self: center; margin-top: 2px; font-size: 13px; color: var(--muted); }
+/* short phones: the pill would push the hero taller than the % */
+@media (max-width: 899px) and (max-height: 760px) and (orientation: portrait) {
+  .cal-pill { margin-top: 5px; }
+}

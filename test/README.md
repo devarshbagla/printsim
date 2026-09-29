@@ -5,7 +5,16 @@ The gate is `ci-check.mjs` plus `physics-geometry-test.mjs`: both exit nonzero
 when something breaks. The other scripts print readouts for humans.
 
 ```
-node test/ci-check.mjs /tmp/libbgcode/tests/data   # asserts decode, timing, resync, support check
+node test/ci-check.mjs /tmp/libbgcode/tests/data   # asserts decode, timing, resync, support check,
+                                                   # service worker precache list, calendar export
+```
+
+Browser end-to-end (headless Chromium, software WebGL, takes a few minutes):
+
+```
+pip install playwright && python -m playwright install chromium
+python test/e2e/e2e.py --shots /tmp/shots   # phone + laptop layouts, calendar flow (laptop + iOS path),
+                                            # filament-swap reminders, spaghetti warning
 ```
 
 Node checks for the decoder, parser and time model. They need Prusa's

@@ -44,3 +44,29 @@ jobs:
           node test/timeline-test.mjs "$D"
           node test/physics-test.mjs samples/*.gcode test/bridge.gcode "$D"/*.bgcode
           MATS=PETG,ABS node test/physics-test.mjs test/bridge.gcode samples/mushroom-no-supports.gcode
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Playwright + Chromium
+        run: |
+          pip install playwright==1.56.0
+          python -m playwright install --with-deps chromium
+
+      - name: Phone + laptop end-to-end
+        run: python test/e2e/e2e.py --shots e2e-shots
+
+      - name: Keep screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: e2e-shots
+          if-no-files-found: ignore
