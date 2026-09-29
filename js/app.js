@@ -6,6 +6,7 @@ import { MATERIALS } from './materials.js';
 import { simulatePhysics } from './physics.js';
 import { idbGet, idbSet, idbDel, lsGet, lsSet, getCalibration, addCalibration } from './store.js';
 import { planEvents, buildIcs, googleCalendarUrl } from './ics.js';
+import { spaghettiReport, fmtGrams } from './report.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -184,7 +185,6 @@ function onParsed(restore) {
   if (ft || g) bits.push([ft, g ? `${parseFloat(g).toFixed(g < 10 ? 1 : 0)} g` : ''].filter(Boolean).join(' '));
   if (parsed.filamentChanges) bits.push(`${parsed.filamentChanges} colour change${parsed.filamentChanges > 1 ? 's' : ''}`);
   $('file-meta').textContent = bits.join(' · ');
-  renderSupportWarning();
 
   if (restore && restore.run) {
     run = restore.run;
@@ -214,6 +214,7 @@ function rebuildTimeline(factorOverride) {
   view.setSegTimes(times);
   updateSetupEstimate();
   updateSpeedNote();
+  renderSupportWarning(); // says when it goes wrong, which moves with the timeline
 }
 
 // ---------------------------------------------------------------- modes
@@ -292,8 +293,7 @@ function applyMaterial(key) {
   parsed.activeMaterial = key;
   view.setCurl(MATERIALS[key].curl);
   view.setData(parsed.segs, parsed.bbox);
-  rebuildTimeline();
-  renderSupportWarning();
+  rebuildTimeline(); // also re-renders the support warning
   updateMaterialNote();
   applyScrub();
   saveSession();
@@ -391,9 +391,28 @@ function renderSupportWarning() {
   if (!sp || sp.failedFraction < 0.002 || sp.failedSegments < 20) { show(box, false); return; }
   const pct = sp.failedFraction * 100;
   const noSupports = String(parsed.meta.config.support_material ?? '').trim() === '0';
-  box.innerHTML = `<b>Heads up: this looks like it'll turn into spaghetti</b>
-    From layer ${sp.firstLayer + 1}, about ${pct < 1 ? pct.toFixed(1) : Math.round(pct)}% of the print has nothing underneath it${noSupports ? ' (supports are off in the slicer)' : ''}. Those strands will droop or fall. Add supports in your slicer, or hit play to watch it happen.
-    <label class="toggle"><input type="checkbox" id="physics" ${prefs.physics ? 'checked' : ''}> Simulate falling filament</label>`;
+  const why = noSupports ? ' (supports are off in the slicer)' : '';
+  const rep = tl ? spaghettiReport(parsed, (k) => tl.tStart(k), tl.startupEnd, tl.total, setup.material) : null;
+  let head, body;
+  if (rep) {
+    const when = rep.tFail < 60 ? 'right at the start' : `about ${fmtDur(rep.tFail)} in`;
+    const at = `At about ${Math.max(1, Math.round(rep.pctFail))}% through`;
+    head = `Spaghetti alert: goes wrong ${when} (layer ${rep.layer + 1})`;
+    body = rep.severe
+      ? `${at}, it starts laying plastic on thin air${why}. Roughly ${fmtGrams(rep.spaghettiG)} ends up as spaghetti, and the ${fmtGrams(rep.afterG)} printed from then on is at risk.`
+      : `${at}, a few spots have nothing underneath them${why}. About ${fmtGrams(rep.spaghettiG)} will droop or fall there, so expect some mess.`;
+  } else {
+    head = "Heads up: this looks like it'll turn into spaghetti";
+    body = `From layer ${sp.firstLayer + 1}, about ${pct < 1 ? pct.toFixed(1) : Math.round(pct)}% of the print has nothing underneath it${why}. Those strands will droop or fall.`;
+  }
+  box.textContent = '';
+  const b = document.createElement('b');
+  b.textContent = head;
+  box.append(b, `${body} Add supports in your slicer, or hit play to watch it happen.`);
+  const lab = document.createElement('label');
+  lab.className = 'toggle';
+  lab.innerHTML = `<input type="checkbox" id="physics" ${prefs.physics ? 'checked' : ''}> Simulate falling filament`;
+  box.appendChild(lab);
   show(box, true);
   $('physics').onchange = (e) => {
     prefs.physics = e.target.checked;

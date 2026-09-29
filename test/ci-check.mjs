@@ -139,5 +139,31 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
     g.searchParams.get('dates') === '20260929T050000Z/20260929T051500Z' && g.searchParams.get('text') === ev[2].title);
 }
 
+// ---- spaghetti report (js/report.js): when it goes wrong, grams at stake ----
+{
+  const { spaghettiReport, gramsPerMm, statedGrams } = await import('../js/report.js');
+  const prep = async (path, mat) => {
+    const { parsed } = await load(path);
+    const m = mat || detectMaterial(parsed.meta.config);
+    parsed.rawSegs = parsed.segs; parsed.rawLayerSeg = parsed.layers.seg.slice();
+    simulatePhysics(parsed, m, nozzleTemp(parsed.meta.config));
+    const tl = buildTimeline(parsed, PRINTERS['prusa-mini'], { nozzleNow: 22, bedNow: 22 });
+    return { parsed, m, r: spaghettiReport(parsed, (k) => tl.tStart(k), tl.startupEnd, tl.total, m) };
+  };
+  const { r } = await prep(`${here}samples/mushroom-no-supports.gcode`);
+  check('report: mushroom goes wrong on layer 61', r && r.layer + 1 === 61, r && `layer ${r.layer + 1}`);
+  check('report: mushroom goes wrong 3 to 6 min in (~28%)', r && r.tFail > 180 && r.tFail < 360 && r.pctFail > 20 && r.pctFail < 35, r && `${(r.tFail / 60).toFixed(1)} min, ${r.pctFail.toFixed(0)}%`);
+  check('report: spaghetti grams <= grams at risk <= total', r && r.spaghettiG > 1 && r.spaghettiG <= r.afterG && r.afterG <= r.totalG, r && `${r.spaghettiG.toFixed(2)} / ${r.afterG.toFixed(2)} / ${r.totalG.toFixed(2)} g`);
+  check('report: mushroom counts as severe', r && r.severe);
+  check('report: nothing to report for the vase', (await prep(`${here}samples/twisted-vase.gcode`)).r === null);
+  // net extruder travel reproduces PrusaSlicer's own filament weight
+  for (const f of ['mini_cube_b.bgcode', 'mini_cube_ps2.8.1.bgcode']) {
+    const { parsed, m } = await prep(`${dir}/${f}`);
+    let net = 0; for (const v of parsed.moves.e) net += v;
+    const g = net * gramsPerMm(parsed.meta.config, m), want = statedGrams(parsed.meta.config);
+    check(`report: ${f} filament from E within 1% of the slicer's grams`, Math.abs(g / want - 1) < 0.01, `${g.toFixed(3)} vs ${want} g`);
+  }
+}
+
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

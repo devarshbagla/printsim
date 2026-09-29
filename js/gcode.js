@@ -591,6 +591,7 @@ export function parseGcode(src, opts = {}) {
   return {
     moves: {
       pos: mPos.done(), kind: mKind.done(), raw, event: mEvent.done(), param: mParam.done(),
+      e: mE.done(), // filament pushed per move (mm, signed: retracts are negative)
     },
     segs: { start: sStart.done(), end: sEnd.done(), meta: sMeta.done(), move: sMove.done(), fan: sFan.done() },
     layers: { z: Float32Array.from(layerZ), seg: Uint32Array.from(layerSeg) },
@@ -610,7 +611,7 @@ export function parseGcode(src, opts = {}) {
 
 export function transferList(result) {
   const m = result.moves, s = result.segs;
-  return [m.pos.buffer, m.kind.buffer, m.raw.buffer, m.event.buffer, m.param.buffer,
+  return [m.pos.buffer, m.kind.buffer, m.raw.buffer, m.event.buffer, m.param.buffer, m.e.buffer,
     s.start.buffer, s.end.buffer, s.meta.buffer, s.move.buffer, s.fan.buffer,
     result.layers.z.buffer, result.layers.seg.buffer,
     ...result.thumbs.map(t => t.data.buffer)];
