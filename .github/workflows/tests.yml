@@ -1,0 +1,46 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Prusa's reference files, pinned so a change upstream can't break CI
+      LIBBGCODE_SHA: d4da9073616d70a43c151e8c1d7fbff879d2e08a
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Fetch Prusa reference files (libbgcode)
+        run: |
+          git init -q "$RUNNER_TEMP/libbgcode"
+          cd "$RUNNER_TEMP/libbgcode"
+          git remote add origin https://github.com/prusa3d/libbgcode
+          git fetch -q --depth 1 origin "$LIBBGCODE_SHA"
+          git checkout -q FETCH_HEAD
+          echo "D=$RUNNER_TEMP/libbgcode/tests/data" >> "$GITHUB_ENV"
+
+      - name: Invariants (must pass)
+        run: node test/ci-check.mjs "$D"
+
+      - name: Physics geometry
+        run: node test/physics-geometry-test.mjs
+
+      - name: Readouts (for humans reading the log)
+        run: |
+          node test/parse-test.mjs "$D"
+          node test/timeline-test.mjs "$D"
+          node test/physics-test.mjs samples/*.gcode test/bridge.gcode "$D"/*.bgcode
+          MATS=PETG,ABS node test/physics-test.mjs test/bridge.gcode samples/mushroom-no-supports.gcode

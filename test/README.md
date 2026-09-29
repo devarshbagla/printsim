@@ -1,5 +1,13 @@
 # Tests
 
+CI (`.github/workflows/tests.yml`) runs on every push to `main` and every PR.
+The gate is `ci-check.mjs` plus `physics-geometry-test.mjs`: both exit nonzero
+when something breaks. The other scripts print readouts for humans.
+
+```
+node test/ci-check.mjs /tmp/libbgcode/tests/data   # asserts decode, timing, resync, support check
+```
+
 Node checks for the decoder, parser and time model. They need Prusa's
 reference files from https://github.com/prusa3d/libbgcode (`tests/data`):
 
