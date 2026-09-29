@@ -124,6 +124,9 @@ def main():
             ctx, page = new_page(browser, url, w, h, errors)
             tag = f'{w}x{h}'
             check(f'{tag} landing fits the width', overflow(page) <= 0, f'{overflow(page)}px over')
+            page.wait_for_function('window.__printsim.view.insets.left > 0 || window.__printsim.view.insets.bottom > 0')
+            ins = page.evaluate('window.__printsim.view.insets')
+            check(f'{tag} landing printer spins beside the text, not behind it', (ins['left'] > w * 0.3) if w > h else (ins['bottom'] > h * 0.5), str(ins))
             shot(page, f'{tag}-landing')
             load_sample(page, 'twisted-vase.gcode')
             check(f'{tag} setup fits the width', overflow(page) <= 0)
@@ -172,6 +175,8 @@ def main():
         # ---- calendar flow: laptop download, iOS data: navigation, filament swap ----
         errors = []
         ctx, page = new_page(browser, url, 1280, 780, errors)
+        page.wait_for_function('window.__printsim.view.insets.left > 0')
+        check('laptop landing: text column left, printer right', page.evaluate("document.getElementById('landing').getBoundingClientRect().right") < 1280 * 0.5)
         load_bytes(page, 'vase-with-swap.gcode', with_filament_change())
         start(page)
         page.click('#btn-cal')

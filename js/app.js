@@ -1146,7 +1146,13 @@ function trackInsets() {
   lastInsetCheck = t;
   const sheet = $('sheet');
   let left = 0, bottom = 0;
-  if (!sheet.classList.contains('hidden')) {
+  view.showcase = mode === 'empty';
+  if (mode === 'empty') {
+    // landing: the printer spins in the space the text leaves free, never behind it
+    const land = $('landing'), r = land.getBoundingClientRect();
+    if (r.width < window.innerWidth * 0.75) left = r.right;                              // text column on the left
+    else bottom = window.innerHeight - (parseFloat(getComputedStyle(land).paddingTop) || 0); // printer band on top
+  } else if (!sheet.classList.contains('hidden')) {
     const r = sheet.getBoundingClientRect();
     // side card (laptops, phones on their side) vs bottom sheet
     if (r.width < window.innerWidth * 0.75) left = r.right; else bottom = window.innerHeight - r.top;
@@ -1154,7 +1160,7 @@ function trackInsets() {
   view.setInsets(left, bottom);
   // refit once per layout (mode / file / big resize)
   const key = `${mode}|${file && file.name}|${Math.round(left / 40)}|${Math.round(bottom / 40)}|${window.innerWidth > window.innerHeight}`;
-  if (key !== insetsFitted && mode !== 'empty') { insetsFitted = key; view.fit(); }
+  if (key !== insetsFitted) { insetsFitted = key; view.fit(); }
 }
 
 function frame() {

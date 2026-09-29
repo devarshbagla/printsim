@@ -556,3 +556,27 @@ dialog .actions { margin-top: 16px; }
 @media (prefers-reduced-motion: reduce) { .more-toggle .chev { transition: none; } }
 /* collapsed sheet hides the options, so the chevron points down again */
 .sheet.collapsed .more-toggle .chev { transform: none; }
+
+/* ---------- landing: the spinning printer never sits behind the text ---------- */
+/* phones held upright: the printer gets its own band at the top; the text below
+   sits on solid background that scrolls with it (background-attachment: local) */
+@media (max-width: 899px) and (orientation: portrait) {
+  .landing {
+    --stage: max(230px, 34vh);
+    padding-top: var(--stage);
+    background: linear-gradient(180deg, rgba(15,17,20,0) 0, rgba(15,17,20,0) calc(var(--stage) - 56px), var(--bg) calc(var(--stage) - 6px)) local;
+  }
+  .landing-inner { margin: 0 auto auto; }
+}
+/* laptops and phones on their side: text in a column on the left, printer on the right */
+@media (min-width: 900px), (orientation: landscape) and (max-height: 520px) {
+  .landing {
+    right: auto; width: min(560px, 48vw);
+    padding: 88px 84px 32px 48px;
+    background: linear-gradient(90deg, rgba(15,17,20,.96) 0, rgba(15,17,20,.96) calc(100% - 72px), rgba(15,17,20,0));
+  }
+  .landing-inner { margin: auto 0; max-width: 440px; }
+}
+@media (orientation: landscape) and (max-height: 520px) {
+  .landing { width: min(56vw, 480px); padding: 56px 56px 16px max(20px, env(safe-area-inset-left)); }
+}

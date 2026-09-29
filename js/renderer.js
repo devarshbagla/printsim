@@ -561,7 +561,9 @@ export class PrintView {
     const b = this.bbox;
     let cx = 0, cy = 0, cz = 0, r = Math.max(this.bedW, this.bedD) * 0.55;
     const w0 = Math.max(this.lastW || this.canvas.clientWidth, 1), h0 = Math.max(this.lastH || this.canvas.clientHeight, 1);
-    const narrow = Math.min(w0, h0) < 600; // phones: the print is the point, not the frame
+    // phones: the print is the point, not the frame (except on the landing page,
+    // where the whole printer is the showpiece)
+    const narrow = Math.min(w0, h0) < 600 && !this.showcase;
     if (this.printerView && this.printer && narrow) {
       // frame the bed and the print; the gantry and frame run off the edges
       const top = b && isFinite(b.max[2]) ? b.max[2] : 20;
@@ -585,6 +587,8 @@ export class PrintView {
     const dV = r / tanV * (h / visH);
     const dH = r / (tanV * (w / h)) * (w / visW);
     const dist = Math.max(dV, dH) * 1.3;
+    // a short strip of screen (the landing's printer band) needs the camera further out
+    this.controls.maxDistance = Math.max(1200, dist * 1.6);
     const target = new THREE.Vector3(cx, cy, cz);
     const dir = new THREE.Vector3(0.55, 0.55, 0.9).normalize();
     this.controls.target.copy(target);
