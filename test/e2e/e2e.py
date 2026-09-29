@@ -113,6 +113,18 @@ def main():
             check(f'{tag} Remind me button is on screen', box and box['x'] >= 0 and box['x'] + box['width'] <= w and box['y'] + box['height'] <= h,
                   str({k: round(v) for k, v in (box or {}).items()}))
             shot(page, f'{tag}-run')
+            # SwiftShader runs ~1 fps, so CSS transitions barely advance: check end states
+            page.add_style_tag(content='.more-toggle .chev { transition: none !important; }')
+            rot = lambda: page.evaluate("getComputedStyle(document.querySelector('#btn-more .chev')).transform")
+            check(f'{tag} options chevron points down when closed', rot() in ('none', 'matrix(1, 0, 0, 1, 0, 0)') and page.is_hidden('#more'), rot())
+            page.click('#btn-more')
+            page.wait_for_timeout(400)
+            check(f'{tag} tap opens options, chevron flips up', page.is_visible('#more') and page.get_attribute('#btn-more', 'aria-expanded') == 'true' and rot().startswith('matrix(-1'), rot())
+            check(f'{tag} open options still fit the width', overflow(page) <= 0)
+            shot(page, f'{tag}-run-more')
+            page.click('#btn-more')
+            page.wait_for_timeout(400)
+            check(f'{tag} tap again closes, chevron points down', page.is_hidden('#more') and page.get_attribute('#btn-more', 'aria-expanded') == 'false' and rot() in ('none', 'matrix(1, 0, 0, 1, 0, 0)'), rot())
             check(f'{tag} no JS errors', not errors, '; '.join(errors)[:300])
             ctx.close()
 

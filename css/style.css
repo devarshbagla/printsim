@@ -546,3 +546,11 @@ dialog .actions { margin-top: 16px; }
 #dlg-video { width: min(420px, calc(100vw - 32px)); }
 .video-out { display: block; width: 100%; max-height: 52vh; object-fit: contain; border-radius: 14px; background: #000; margin: 6px 0 8px; }
 .video-meta { margin: 0 0 12px; }
+
+/* ---------- More toggle: chevron down when closed, flips up when open ---------- */
+.more-toggle .chev { transition: transform .22s cubic-bezier(.3,.7,.3,1); }
+.more-toggle[aria-expanded="true"] .chev { transform: rotate(180deg); }
+.more-toggle[aria-expanded="true"] { background: rgba(255,255,255,.12); border-color: color-mix(in srgb, var(--accent) 45%, var(--line-2)); }
+@media (prefers-reduced-motion: reduce) { .more-toggle .chev { transition: none; } }
+/* collapsed sheet hides the options, so the chevron points down again */
+.sheet.collapsed .more-toggle .chev { transform: none; }

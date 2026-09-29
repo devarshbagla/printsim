@@ -1040,6 +1040,7 @@ function wire() {
     $('run-speed').value = setup.speedPct || 100;
     show('more', open);
     $('btn-more').setAttribute('aria-expanded', open);
+    $('btn-more').setAttribute('aria-label', open ? 'Fewer options' : 'More options');
   };
   $('btn-finished').onclick = printerFinished;
   $('btn-cal').onclick = openCalendar;
