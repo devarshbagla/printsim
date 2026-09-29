@@ -100,6 +100,29 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   }
 }
 
+// ---- fallen plastic: drawn with the same volume the nozzle extruded ----
+{
+  const { parsed } = await load(`${here}samples/mushroom-no-supports.gcode`);
+  parsed.rawSegs = parsed.segs; parsed.rawLayerSeg = parsed.layers.seg.slice();
+  simulatePhysics(parsed, 'PLA', 215);
+  const s = parsed.segs, NL = parsed.layers.z.length, N = s.meta.length;
+  const lh = new Float32Array(N);
+  for (let L = 0; L < NL; L++) lh.fill(L ? parsed.layers.z[L] - parsed.layers.z[L - 1] : parsed.layers.z[0], parsed.layers.seg[L], L + 1 < NL ? parsed.layers.seg[L + 1] : N);
+  let ext = 0, drawn = 0;
+  for (let i = 0; i < N; i++) {
+    const d0 = s.drop[i * 2], d1 = s.drop[i * 2 + 1];
+    if (!(d0 > 0 && d1 > 0)) continue;
+    const w = s.meta[i] - Math.floor(s.meta[i] / 4 + 1e-3) * 4, h = lh[i];
+    const dx = s.end[i * 3] - s.start[i * 3], dy = s.end[i * 3 + 1] - s.start[i * 3 + 1], dz = (s.end[i * 3 + 2] - d1) - (s.start[i * 3 + 2] - d0);
+    const L0 = Math.hypot(dx, dy), L = Math.hypot(dx, dy, dz);
+    ext += w * h * L0;
+    // same thickness rule as the renderer's vertex shader (round, same area, thinned when stretched)
+    const r = Math.sqrt((w * h) / Math.PI) * Math.sqrt(Math.min(1, Math.max(0.25, L0 / Math.max(L, 1e-4))));
+    drawn += L * Math.PI * r * r;
+  }
+  check('fallen plastic is drawn with the volume that was extruded', ext > 100 && Math.abs(drawn / ext - 1) < 0.1, `${(drawn / ext).toFixed(2)}x of ${ext.toFixed(0)} mm3`);
+}
+
 // ---- service worker: every module is precached, or the app won't boot offline ----
 {
   const { readdirSync, existsSync } = await import('node:fs');

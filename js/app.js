@@ -2,7 +2,7 @@ import { PrintView, FEATURE_COLORS } from './renderer.js';
 import { buildTimeline, stateAt, timeForPercent } from './timeline.js';
 import { FeatureNames, Feature } from './gcode.js';
 import { PRINTERS, AMBIENT, guessPrinter } from './printers.js';
-import { MATERIALS } from './materials.js';
+import { MATERIALS, surfaceFor } from './materials.js';
 import { simulatePhysics } from './physics.js';
 import { idbGet, idbSet, idbDel, lsGet, lsSet, getCalibration, addCalibration } from './store.js';
 import { planEvents, buildIcs, googleCalendarUrl } from './ics.js';
@@ -10,6 +10,10 @@ import { spaghettiReport, fmtGrams } from './report.js';
 import { TimelapseRecorder, recordingType } from './recorder.js';
 
 const $ = (id) => document.getElementById(id);
+
+// How long a strand takes to fall, in PRINT time. Fixed, so at 10x playback a fall
+// is 10x quicker on screen, just like everything else the printer does.
+const FALL_SECONDS = 0.7;
 
 const SWATCHES = [
   ['Orange', '#ff7a1a'], ['White', '#f2f2ee'], ['Black', '#2a2b30'], ['Grey', '#8a8f96'],
@@ -159,9 +163,10 @@ function onParsed(restore) {
   if (setup.material !== parsed.material) simulatePhysics(parsed, setup.material, parsed.nozzleTemp);
   parsed.activeMaterial = setup.material;
   view.setCurl(MATERIALS[setup.material].curl);
+  view.setSurface(surfaceFor(setup.material, cfg));
   const printer = PRINTERS[setup.printerId] || PRINTERS['prusa-mini'];
   view.setBed(printer.bed.w, printer.bed.d);
-  view.setData(parsed.segs, parsed.bbox);
+  view.setData(parsed.segs, parsed.bbox, parsed.layers);
   view.setColor(setup.color);
   setAccent(setup.color);
   renderSwatches();
@@ -236,6 +241,7 @@ function setMode(m) {
   if (m === 'setup') applyScrub();
   view.setGhost(ghostOn());
   if (m === 'run') { view.setWarnTint(0); view.setPhysics(prefs.physics); scheduleGhostHint(); } else hideGhostHint();
+  view.maxFps = m === 'run' ? 15 : 0; // a live print moves slowly: 15 fps is plenty
   if (m === 'done') { view.setHead(parsed.segs.move.length, null, false, false); view.setSimTime(1e9); view.setWarnTint(0); view.setScreen({ title: 'finished', big: '100%', line1: 'Print done', line2: '', progress: 1, accent: accentHex() }); }
   if (m === 'empty') document.title = 'printsim';
   lastUi = 0;
@@ -293,7 +299,8 @@ function applyMaterial(key) {
   simulatePhysics(parsed, key, parsed.nozzleTemp);
   parsed.activeMaterial = key;
   view.setCurl(MATERIALS[key].curl);
-  view.setData(parsed.segs, parsed.bbox);
+  view.setSurface(surfaceFor(key, parsed.meta.config));
+  view.setData(parsed.segs, parsed.bbox, parsed.layers);
   rebuildTimeline(); // also re-renders the support warning
   updateMaterialNote();
   applyScrub();
@@ -345,9 +352,8 @@ function renderPreview() {
     return;
   }
   const st = stateAt(parsed, tl, preview.t);
-  const speed = preview.playing ? playSpeed() : 1;
   view.setWarnTint(0);
-  view.setSimTime(preview.t, Math.max(0.8, 0.8 * speed));
+  view.setSimTime(preview.t, FALL_SECONDS);
   if (prefs.layerMode) {
     // like a printer timelapse: one frame per finished layer, nozzle parked
     view.setHead(parsed.layers.seg[st.layer] ?? S, null, false, false);
@@ -389,22 +395,42 @@ function updateSpeedNote() {
   $('speed-note').textContent = `Whole print plays in ${fmtDur(printSpan() / prefs.speed)} at ${prefs.speed}×`;
 }
 
+// Why the slicer left it unsupported, from the file's own settings
+function supportNote(p) {
+  const cfg = p.meta.config;
+  const on = String(cfg.support_material ?? '').trim();
+  const hasSupports = p.features && (p.features.includes(Feature.Support) || p.features.includes(Feature.SupportInterface));
+  if (on === '0') return ' (supports are off in the slicer)';
+  if (on === '1' && !hasSupports) {
+    return String(cfg.support_material_auto ?? '').trim() === '0'
+      ? ' (supports are on, but only where painted, and nothing was painted)'
+      : " (supports are on, but the slicer didn't put any here)";
+  }
+  return '';
+}
+
 function renderSupportWarning() {
   const box = $('support-warn');
   const sp = parsed.support;
   if (!sp || sp.failedFraction < 0.002 || sp.failedSegments < 20) { show(box, false); return; }
   const pct = sp.failedFraction * 100;
-  const noSupports = String(parsed.meta.config.support_material ?? '').trim() === '0';
-  const why = noSupports ? ' (supports are off in the slicer)' : '';
+  const why = supportNote(parsed);
   const rep = tl ? spaghettiReport(parsed, (k) => tl.tStart(k), tl.startupEnd, tl.total, setup.material) : null;
-  let head, body;
+  const n = sp.islands || 0;
+  let head, body, fix = 'Add supports in your slicer';
   if (rep) {
     const when = rep.tFail < 60 ? 'right at the start' : `about ${fmtDur(rep.tFail)} in`;
-    const at = `At about ${Math.max(1, Math.round(rep.pctFail))}% through`;
+    const at = `about ${Math.max(1, Math.round(rep.pctFail))}% through`;
+    const cost = `Roughly ${fmtGrams(rep.spaghettiG)} ends up as spaghetti, and the ${fmtGrams(rep.afterG)} printed from then on is at risk.`;
     head = `Spaghetti alert: goes wrong ${when} (layer ${rep.layer + 1})`;
-    body = rep.severe
-      ? `${at}, it starts laying plastic on thin air${why}. Roughly ${fmtGrams(rep.spaghettiG)} ends up as spaghetti, and the ${fmtGrams(rep.afterG)} printed from then on is at risk.`
-      : `${at}, a few spots have nothing underneath them${why}. About ${fmtGrams(rep.spaghettiG)} will droop or fall there, so expect some mess.`;
+    if (n > 0) {
+      body = `${n === 1 ? 'One part starts' : `${n} parts start`} printing in mid-air with nothing under ${n === 1 ? 'it' : 'them'}${why}, the first ${at}. ${cost}`;
+      if (why.includes('painted')) fix = 'Turn on automatic supports (or paint them under those parts)';
+    } else if (rep.severe) {
+      body = `At ${at}, it starts laying plastic on thin air${why}. ${cost}`;
+    } else {
+      body = `At ${at}, a few spots have nothing underneath them${why}. About ${fmtGrams(rep.spaghettiG)} will droop or fall there, so expect some mess.`;
+    }
   } else {
     head = "Heads up: this looks like it'll turn into spaghetti";
     body = `From layer ${sp.firstLayer + 1}, about ${pct < 1 ? pct.toFixed(1) : Math.round(pct)}% of the print has nothing underneath it${why}. Those strands will droop or fall.`;
@@ -412,7 +438,7 @@ function renderSupportWarning() {
   box.textContent = '';
   const b = document.createElement('b');
   b.textContent = head;
-  box.append(b, `${body} Add supports in your slicer, or hit play to watch it happen.`);
+  box.append(b, `${body} ${fix}, or hit play to watch it happen.`);
   const lab = document.createElement('label');
   lab.className = 'toggle';
   lab.innerHTML = `<input type="checkbox" id="physics" ${prefs.physics ? 'checked' : ''}> Simulate falling filament`;
@@ -586,7 +612,7 @@ function updateRunUI(t) {
   const s = simNow(t);
   const st = stateAt(parsed, tl, s);
   view.setHead(st.segHead, st.head, true, st.extruding && run.running);
-  view.setSimTime(s, 0.8);
+  view.setSimTime(s, FALL_SECONDS);
   if (t - lastUi < 200) return;
   lastUi = t;
 
@@ -974,7 +1000,7 @@ function wire() {
     setup.printerId = e.target.value;
     const p = PRINTERS[setup.printerId];
     view.setBed(p.bed.w, p.bed.d);
-    view.setData(parsed.segs, parsed.bbox);
+    view.setData(parsed.segs, parsed.bbox, parsed.layers);
     rebuildTimeline();
     applyScrub();
     saveSession();
@@ -1176,6 +1202,7 @@ window.__printsim = {
   get timeline() { return tl; },
   get run() { return run; },
   get recording() { return !!rec; },
+  get view() { return view; },
 };
 
 init();

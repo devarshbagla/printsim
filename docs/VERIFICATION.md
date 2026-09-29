@@ -8,6 +8,8 @@ Sources:
 - **PS**: [PrusaSlicer](https://github.com/prusa3d/PrusaSlicer) @ `30ef591` (Sep 2026), `src/libpgcode`, `GCode/PostProcessor.cpp`
 - **PROF**: [PrusaSlicer-settings-prusa-fff](https://github.com/prusa3d/PrusaSlicer-settings-prusa-fff) `PrusaResearch/2.5.10.ini`
 - **LIB**: [libbgcode](https://github.com/prusa3d/libbgcode) (reference .bgcode decoder + MINI test files)
+- **HW**: [Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI) (open-source hardware: part drawings in `DOCUMENTATION/MECHANICAL PARTS`, axis renders in `BOM/img`), checked 2026-09-29
+- **MAN**: [MINI+ kit assembly manual](https://help.prusa3d.com/manual/original-prusa-mini-kit-assembly_1215)
 
 ## Corrected (these were wrong)
 
@@ -39,8 +41,25 @@ Sources:
 | Heat and short layers | only weakened overhang angle | also weaken cantilever and bridge length; layers under ~8 s get less time to cool | same review |
 | Print-in-place gaps | a strand with nothing directly under it fell, even with the part below only 0.5 mm away, and everything above cascaded (YAFIC infinity cube: 7.6 % false alarm) | a strand within **0.8 mm** of held plastic or the bed sags onto it and holds (hinge knuckles, support gaps); YAFIC now 0.00 % | user's print file; `test/physics-geometry-test.mjs` |
 | Hinges past an edge | stamped as solid support | stamped 1.5 layers low so overhangs can't creep outward layer by layer | own test (line on a pad) |
+| Parts starting in mid-air | lumped into "% of the print fails" (the melting Switch stand read as "a few spots", 2.4 %) | counted separately: a strand whose whole same-layer blob has nothing held, merged up through the layers; the stand has **8** drips that start in the air (each checked: zero plastic within 2 mm below the tip), the mushroom cap 0 | user's print file; `test/physics-geometry-test.mjs` (drip vs shelf) |
+| Why there are no supports | only "supports are off" | also "on, but only where painted" (`support_material_auto = 0` and no support lines in the file) | PROF / PrusaSlicer config keys |
+| Strand shape on screen | round tube as wide as the line, centred on the nozzle height (layers overlapped, 0.1 mm layers shimmered) | flat-topped "stadium" line width × layer height, sitting half a layer under the nozzle; sub-pixel layers shade as the surface they form | PrusaSlicer's own extrusion cross-section model (rectangle with round ends) |
+| Fallen plastic amount | each fallen layer raised the pile a fixed ~0.6 mm (vs 0.1 to 0.2 mm of plastic per layer) and fallen strands were drawn 0.36 mm thick regardless of layer height: ~5x the real plastic on screen | pile rises by exactly the volume that lands on it; a fallen strand is round with the **same cross-section area** (w × h) and thins if curling stretches it; a strand still tied to a hinge hangs no lower than its own length allows. Test: 10 floating 0.2 mm layers pile to 1.99 mm (was 5.55); fallen plastic drawn at 1.03× the extruded volume on the mushroom (was 1.47×, before the pile fix) | user report; `test/physics-geometry-test.mjs`, `test/ci-check.mjs` |
+| Falling speed in the preview | a fall always took ~0.8 s on screen, whatever the playback speed | a fall takes 0.7 s of **print** time, so 10× playback falls 10× faster | user report |
+| Printer: Z column | 40×40 extrusion, ~404 mm tall, lone rods beside it | **30×30×289** extrusion; Z rods **Ø10×341** and the leadscrew in one row with it (20 mm steps, extrusion 21 mm behind the rear rod), Z plate bottom 119×30×5; total height ~381 mm (spec 380) | HW `mini-z-extrusion.pdf`, `mini-z-rod.pdf`, `mini-z-plate-bottom.pdf`, `BOM/img/z-axis.png` |
+| Printer: base | one centre spine | **two 30×30×262** Y extrusions, front and rear plates, **Ø8×279** Y rods at the outer ends, Y motor on the rear plate | HW `mini-y-extrusion.pdf`, `mini-y-rod.pdf`; MAN ch. 2 ("two shorter (262 mm) extrusions", "Y-axis motor ... on the MINI-Y-plate-rear") |
+| Printer: extruder | fixed at the top of the column | **rides on the Z carriage** with the gantry | MAN ch. 3 step 52 ("Place the extruder on the Z-carriage") |
+| Printer: X axis | rods, motor on the carriage front | **Ø8×279** rods stacked with the belt between, X motor hanging off the Z carriage at an angle, idler at the free end | HW `mini-x-rod.pdf`, `BOM/img/x-axis.png` |
+| Printer: head | fan, fins, block | adds the probe **29 mm left** of the nozzle (firmware probe offset), blower fan behind with its duct, PTFE fitting on top | FW probe offset; HW `BOM/img/x-axis.png` |
+| Printer: steel sheet | 204 × 206 mm with tabs sticking out | **190 × 200 mm**, ears with Ø3.5 locating holes at the back, 3.7 mm recess along the front | HW `mini-steelsheet-std.pdf` |
+| Printer: Bowden tube | drawn to a fixed extruder point | fixed **275 mm** length between two points that both ride the gantry, so it loops up when the head is near the extruder and straightens when it's far | HW `PTFE-tube-bowden-275.pdf` |
+| Printer: electronics, spool | not modelled | electronics box with switch at the column foot; spool on its separate stand behind the printer, in the filament colour | MAN ch. 2 ("Insert the board into the MINI-Z-bottom"), ch. 6 (spool holder is a separate stand) |
 
 Net effect on the motion model vs PrusaSlicer (before M73 anchoring): laptop stand −0.1 %, Cessna 55 m −0.5 %, Cessna 30 m −0.5 %, cube −0.5 %, PS 2.8.1 cube 0.0 %. Previously +0.3 % to +2.6 %.
+
+Not copied on purpose: Prusa's logos, wordmark and orange. Layout, sizes and motion follow the drawings; the look stays neutral.
+
+Also checked and kept: the Z motor sits **on top** of the column under the Z-top (`BOM/img/z-axis.png`), the column is on the **right** (the probe sits left of the nozzle in the X-axis render, matching the firmware's −29 mm X offset).
 
 ## Confirmed (already right)
 

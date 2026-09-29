@@ -110,3 +110,15 @@ export function limitsFor(mat, fan01, temp, cool = 1) {
     sag: lerp(mat.sag) / q,
   };
 }
+
+// How the plastic looks (roughness 0..1, metal 0..1). Base look per material,
+// then the filament's profile name: silk filaments are glossy with coloured,
+// metal-like highlights; matte ones scatter everything.
+const SURFACE = { PLA: 0.42, PETG: 0.22, ABS: 0.5, ASA: 0.58, PC: 0.26, PA: 0.52, TPU: 0.46, PVA: 0.6, GENERIC: 0.42 };
+export function surfaceFor(key, config = {}) {
+  const name = String(config.filament_settings_id || config.filament_type || '').toLowerCase();
+  if (/silk/.test(name)) return { rough: 0.2, metal: 0.55 };
+  if (/matte|matt\b/.test(name)) return { rough: 0.78, metal: 0 };
+  if (/galaxy|glitter|sparkle/.test(name)) return { rough: 0.3, metal: 0.15 };
+  return { rough: SURFACE[key] ?? 0.42, metal: 0 };
+}

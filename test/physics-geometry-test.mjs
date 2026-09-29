@@ -84,7 +84,10 @@ const far = [[60, 60, 70, 60, 5]]; // keeps an otherwise empty layer from being 
   const edge = Math.max(...held.map((q) => q.x));
   check('line: part over the pad holds', l2.filter((q) => q.x < 9.5).every((q) => q.drop === 0));
   check('line: hinge ~cantilever length past the pad edge', edge > 10.2 && edge < 13, `held to x=${edge.toFixed(2)}`);
-  check('line: the rest falls to the bed', fell.length > 0 && fell.every((q) => q.x > edge && q.drop > 1.5), `${fell.length} samples fall, first at x=${Math.min(...fell.map((q) => q.x)).toFixed(2)}`);
+  check('line: the rest falls to the bed', fell.length > 0 && fell.filter((q) => q.x > edge + 3).every((q) => q.drop > 1.5), `${fell.length} samples fall, first at x=${Math.min(...fell.map((q) => q.x)).toFixed(2)}`);
+  // tied to the hinge, plastic can't stretch: it hangs no lower than the strand between it and the hinge
+  const worst = Math.max(...fell.map((q) => q.drop - (q.x - edge)));
+  check('line: next to the hinge it hangs, it can\'t stretch', fell.every((q) => q.drop <= (q.x - edge) + 0.3), `max overshoot ${worst.toFixed(2)} mm`);
   const l3 = layerSamples(S, layers, res, 11);
   check('line: next layer holds over the held part', l3.filter((q) => q.x < edge - 0.6).every((q) => q.drop === 0));
   check('line: next layer falls over the gap', l3.filter((q) => q.x > edge + 3).every((q) => q.drop > 0));
@@ -109,6 +112,51 @@ const far = [[60, 60, 70, 60, 5]]; // keeps an otherwise empty layer from being 
   check('gap: the layer on top of it holds', b.every((q) => q.drop === 0 && q.sag === 0));
   const c = layerSamples(S, layers, res, zi(5.0));
   check('gap: island 5 mm over the bed still falls', c.every((q) => q.drop > 4));
+}
+
+// ---------------------------------------------------------------- 5. parts starting in mid-air
+{
+  // a pillar from the bed, plus a "drip": a small square that first appears 5 mm up,
+  // 15 mm from the pillar, and keeps being printed for 20 layers (like the melting
+  // stand's drips); and a shelf growing straight out of the pillar (not a floating part)
+  const sq = (x, y, a) => [[x - a, y - a, x + a, y - a, 1], [x + a, y - a, x + a, y + a, 1], [x + a, y + a, x - a, y + a, 1], [x - a, y + a, x - a, y - a, 1]];
+  const L = [];
+  for (let z = 0.2; z < 9.05; z += 0.2) {
+    const lines = sq(5, 5, 3);
+    if (z > 4.95 && z < 9.05) lines.push(...sq(20, 5, 1.5));                               // drip, from z 5
+    if (z > 7.95) for (let y = 2.2; y < 8; y += 0.45) lines.push([8.2, y, 14, y, 2]);          // shelf off the pillar at z 8
+    L.push([+z.toFixed(2), lines]);
+  }
+  const { S, layers } = build(L);
+  const res = analyzeSupport(S, layers, { material: 'PLA', temp: 215 });
+  const sm = res.summary;
+  check('mid-air: the drip counts as one floating part', sm.islands === 1, `${sm.islands} found`);
+  check('mid-air: found on the layer it starts', sm.islandFirstLayer === Array.from(layers.z).findIndex((z) => z > 4.95), `layer ${sm.islandFirstLayer + 1}`);
+  check('mid-air: the shelf off the pillar is not counted', sm.islandList.every((i) => Math.hypot(i.x - 20, i.y - 5) < 3));
+}
+// ---------------------------------------------------------------- 6. fallen plastic keeps its volume
+{
+  // 10 solid layers (0.2 mm, 10 x 10 mm) printed 5 mm up with nothing under them all
+  // fall onto the bed: the pile they make holds exactly their plastic, ~2 mm tall
+  const fill = () => { const out = []; for (let y = 40; y <= 50; y += 0.45) out.push([40, y, 50, y, 5]); return out; };
+  const L = [];
+  for (let z = 0.2; z < 4.85; z += 0.2) L.push([+z.toFixed(2), far]);
+  for (let k = 0; k < 10; k++) L.push([+(5 + k * 0.2).toFixed(2), fill()]);
+  const { S, layers } = build(L);
+  const res = analyzeSupport(S, layers, { material: 'PLA', temp: 215 });
+  const zs = Array.from(layers.z), first = zs.findIndex((z) => z > 4.95), last = zs.length - 1;
+  const restOf = (Li) => { const zz = zs[Li]; return layerSamples(S, layers, res, Li).map((q) => zz - 0.1 - q.drop); };
+  const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
+  const r1 = avg(restOf(first)), rN = avg(restOf(last));
+  const plastic = 10 * 0.2; // mm of solid plastic stacked
+  check('fallen: everything floating falls', layerSamples(S, layers, res, first).every((q) => q.drop > 3));
+  check('fallen: first layer lands on the bed', r1 > 0.05 && r1 < 0.35, `centre ${r1.toFixed(2)} mm up`);
+  check('fallen: pile holds the plastic that fell, not 3x it', rN > plastic * 0.7 && rN < plastic * 1.35, `10 layers (${plastic} mm of plastic) pile to ${rN.toFixed(2)} mm`);
+}
+{
+  const r = parseGcode(new Uint8Array(readFileSync(new URL('../samples/mushroom-no-supports.gcode', import.meta.url))));
+  const res = analyzeSupport(r.segs, r.layers, { material: 'PLA', temp: 215 });
+  check('mid-air: the mushroom cap is an overhang, not a floating part', res.summary.islands === 0, `${res.summary.islands} found`);
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

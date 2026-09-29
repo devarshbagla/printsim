@@ -54,7 +54,13 @@ export function analyzeSupport(segs, layers, opts = {}) {
   const summary = {
     failedSegments: 0, failedLength: 0, totalLength: 0, firstLayer: -1, lastLayer: -1, layersAffected: 0,
     bridges: 0, maxSag: 0, caught: 0, material: opts.material || 'PLA',
+    islands: 0, islandFirstLayer: -1,
   };
+  // Parts that start printing in mid-air (a drip hanging off a ledge, a model
+  // floating above the bed): a strand with nothing held anywhere near below it
+  // that isn't just the next layer of an overhang collapsing. Consecutive layers
+  // of the same floating part are merged, so each one counts once.
+  const islands = []; // { x, y, lastL, len }
   const segSampleStart = new Uint32Array(S + 1);
   const segSamples = new Uint16Array(S);
   const pathId = new Uint32Array(S);
@@ -79,6 +85,9 @@ export function analyzeSupport(segs, layers, opts = {}) {
   const top = new Float32Array(W * H).fill(-1);   // held plastic (supports things)
   const debris = new Float32Array(W * H);          // fallen plastic (only for landing)
   const side = new Uint32Array(W * H);             // same-layer supported cells, tagged by layer
+  // 1 mm grid linking strands of the same layer that touch (for floating-part detection)
+  const WC = Math.max(1, Math.ceil((maxX - minX))), HC = Math.max(1, Math.ceil((maxY - minY)));
+  const cellL = new Uint32Array(WC * HC), cellOwner = new Int32Array(WC * HC);
 
   // neighbour offsets sorted by distance, so lookups can stop early
   const MAXR = 2.5;
@@ -117,6 +126,25 @@ export function analyzeSupport(segs, layers, opts = {}) {
     const j = cy(y) * W + cx(x);
     return Math.max(0, top[j], debris[j]);
   };
+  // fallen plastic piles up by exactly its own volume: spread a strand piece's
+  // w x h x len over the patch it lands on (so 10 g of spaghetti looks like 10 g)
+  const addDebris = (x, y, vol, rad) => {
+    const x0 = cx(x - rad), x1 = cx(x + rad), y0 = cy(y - rad), y1 = cy(y + rad);
+    let n = 0;
+    for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) {
+      const px = minX + (xx + 0.5) * CELL, py = minY + (yy + 0.5) * CELL;
+      if ((px - x) * (px - x) + (py - y) * (py - y) <= rad * rad + CELL * CELL * 0.25) n++;
+    }
+    if (!n) return;
+    const dh = vol / (n * CELL * CELL);
+    for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) {
+      const px = minX + (xx + 0.5) * CELL, py = minY + (yy + 0.5) * CELL;
+      if ((px - x) * (px - x) + (py - y) * (py - y) <= rad * rad + CELL * CELL * 0.25) {
+        const j = yy * W + xx;
+        debris[j] = Math.max(debris[j], top[j], 0) + dh;
+      }
+    }
+  };
 
   // highest held plastic within r (lines side by side leave hairline gaps in the map)
   const topNear = (x, y, r) => {
@@ -132,7 +160,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
 
   const firstZ = layerZ[0];
   let sSeg = new Int32Array(4096), sOk = new Uint8Array(4096), sX = new Float32Array(4096), sY = new Float32Array(4096),
-    sLen = new Float32Array(4096), sIdx = new Int32Array(4096), sFall = new Uint8Array(4096);
+    sLen = new Float32Array(4096), sIdx = new Int32Array(4096), sFall = new Uint8Array(4096), sRope = new Float32Array(4096);
   const limCache = new Map();
   const lim = (i, cool) => {
     const f = fan ? fan[i] : 255;
@@ -157,6 +185,10 @@ export function analyzeSupport(segs, layers, opts = {}) {
     // short layers don't get time to cool (8 s or more = no penalty)
     const cool = layerSec && layerSec[L] > 0 ? Math.max(0.5, Math.min(1, layerSec[L] / 8)) : 1;
     let affected = false;
+    // union-find over this layer's strands: which blobs have anything that held
+    const par = [], held = [], cands = [];
+    const find = (a) => { while (par[a] !== a) { par[a] = par[par[a]]; a = par[a]; } return a; };
+    const union = (a, b) => { a = find(a); b = find(b); if (a !== b) { par[b] = a; held[a] = held[a] || held[b]; } };
 
     let p = s0;
     while (p < s1) {
@@ -178,7 +210,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
         while (sampleCount + k >= sampleSag.length) { sampleSag = grow(sampleSag, Float32Array); sampleDrop = grow(sampleDrop, Float32Array); }
         while (n + k >= sSeg.length) {
           sSeg = grow(sSeg, Int32Array); sOk = grow(sOk, Uint8Array); sX = grow(sX, Float32Array); sY = grow(sY, Float32Array);
-          sLen = grow(sLen, Float32Array); sIdx = grow(sIdx, Int32Array); sFall = grow(sFall, Uint8Array);
+          sLen = grow(sLen, Float32Array); sIdx = grow(sIdx, Int32Array); sFall = grow(sFall, Uint8Array); sRope = grow(sRope, Float32Array);
         }
         const w = widthOf(meta[i]);
         let r = Math.max(h * lim(i, cool).tan, w * 0.5 + 0.05); // a strand can always hang half its width out
@@ -186,19 +218,21 @@ export function analyzeSupport(segs, layers, opts = {}) {
         for (let j = 0; j < k; j++) {
           const t = (j + 0.5) / k;
           const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
-          sSeg[n] = i; sX[n] = x; sY[n] = y; sLen[n] = len / k; sIdx[n] = sampleCount; sFall[n] = 0;
+          sSeg[n] = i; sX[n] = x; sY[n] = y; sLen[n] = len / k; sIdx[n] = sampleCount; sFall[n] = 0; sRope[n] = Infinity;
           sampleSag[sampleCount] = 0; sampleDrop[sampleCount] = 0; sampleCount++;
           if (onBed) sOk[n] = 1;
           else sOk[n] = within(x, y, r, (c) => top[c] >= need) ? 1 : within(x, y, w * 1.05, (c) => side[c] === L + 1) ? 2 : 0;
           n++;
         }
       }
+      let floating = false;
       if (!onBed) {
         const closed = q - p > 2 && Math.hypot(end[(q - 1) * 3] - start[p * 3], end[(q - 1) * 3 + 1] - start[p * 3 + 1]) < LINK_TOL;
         let off = 0, anyOk = false;
         for (let j = 0; j < n; j++) if (sOk[j]) { anyOk = true; if (closed) off = j; break; }
         if (!anyOk) {
           for (let j = 0; j < n; j++) sFall[j] = 1; // floating island
+          floating = true;
         } else {
           let j = 0;
           while (j < n) {
@@ -237,7 +271,13 @@ export function analyzeSupport(segs, layers, opts = {}) {
                 const d0 = acc + sLen[ii] / 2, d1 = runLen - d0;
                 acc += sLen[ii];
                 const hinge = (startAnch && d0 <= cant) || (endAnch && d1 <= cant);
-                if (hinge) sOk[ii] = 3; else sFall[ii] = 1;
+                if (hinge) sOk[ii] = 3;
+                else {
+                  sFall[ii] = 1;
+                  // still tied to the part through the hinge: it can hang at most
+                  // as far below as there is strand between it and the hinge
+                  sRope[ii] = Math.min(startAnch ? d0 - cant : Infinity, endAnch ? d1 - cant : Infinity);
+                }
               }
             } else if (bridged || (startAnch && endAnch && runLen > 2)) {
               // holds, but droops in the middle
@@ -269,6 +309,23 @@ export function analyzeSupport(segs, layers, opts = {}) {
           summary.caught += sLen[j];
         }
       }
+      // --- connectivity: link this strand to the ones of this layer it touches
+      if (!onBed) {
+        const sid = par.length;
+        let anyHeld = false;
+        for (let j = 0; j < n; j++) if (!sFall[j]) { anyHeld = true; break; }
+        par.push(sid); held.push(anyHeld);
+        for (let j = 0; j < n; j++) {
+          const X = Math.min(WC - 1, Math.max(0, Math.floor(sX[j] - minX))), Y = Math.min(HC - 1, Math.max(0, Math.floor(sY[j] - minY)));
+          const c = Y * WC + X;
+          if (cellL[c] === L + 1) union(cellOwner[c], sid); else { cellL[c] = L + 1; cellOwner[c] = sid; }
+        }
+        if (floating) {
+          let cx_ = 0, cy_ = 0, len = 0;
+          for (let j = 0; j < n; j++) { cx_ += sX[j]; cy_ += sY[j]; len += sLen[j]; }
+          cands.push({ sid, x: cx_ / n, y: cy_ / n, len });
+        }
+      }
       // --- same-layer bonding map: vertically supported or caught samples
       for (let j = 0; j < n; j++) if (sOk[j] === 1 || sOk[j] === 5) {
         const c = cy(sY[j]) * W + cx(sX[j]);
@@ -285,17 +342,22 @@ export function analyzeSupport(segs, layers, opts = {}) {
           const zz = (sOk[j] === 3 || sOk[j] === 4) ? z - h * 1.5 - CATCH : sOk[j] === 5 ? z : z - sampleSag[sIdx[j]];
           stampDisk(top, sX[j], sY[j], zz, w * 0.5);
         } else {
+          // lands on whatever is under it as a round string of the same volume
+          // (its centre one radius up, a little loft for the tangle)
           const g = groundAt(sX[j], sY[j]);
-          const rest = g + Math.min(w, 0.4) * (0.6 + 0.5 * rand()); // lands on whatever is under it
-          sampleDrop[sIdx[j]] = Math.max(0.02, z - rest);
+          const rr = Math.sqrt((w * h) / Math.PI);
+          const rest = g + rr * (1 + 0.6 * rand());
+          const full = z - h * 0.5 - rest; // from the strand's centre, half a layer under the nozzle
+          sampleDrop[sIdx[j]] = Math.max(0.02, Math.min(full, sRope[j] * 0.9 + 0.05));
+          if (full > sRope[j] * 0.9 + 0.05) sRope[j] = -1; // hanging, not on the pile
           summary.failedLength += sLen[j];
           failedHere = true;
         }
       }
       // fallen plastic piles up (after the whole strand fell, so it can't land on itself)
-      for (let j = 0; j < n; j++) if (sFall[j]) {
-        const settled = z - sampleDrop[sIdx[j]];
-        stampDisk(debris, sX[j], sY[j], settled + 0.25, widthOf(meta[sSeg[j]]) * 0.6);
+      for (let j = 0; j < n; j++) if (sFall[j] && sRope[j] !== -1) {
+        const w = widthOf(meta[sSeg[j]]);
+        addDebris(sX[j], sY[j], w * h * sLen[j], w);
       }
       if (failedHere) {
         affected = true;
@@ -304,13 +366,32 @@ export function analyzeSupport(segs, layers, opts = {}) {
       }
       p = q;
     }
+    // floating strands whose whole blob has nothing that held: part of something
+    // being printed in mid-air
+    for (const cd of cands) if (!held[find(cd.sid)]) noteIsland(L, cd.x, cd.y, cd.len, z);
     if (affected) {
       summary.layersAffected++;
       if (summary.firstLayer < 0) summary.firstLayer = L;
       summary.lastLayer = L;
     }
   }
+  let counted = 0;
+  summary.islandList = islands.filter(is => is.len >= 5).map(is => ({ x: is.x, y: is.y, layer: is.firstL, len: is.len }));
+  for (const is of islands) if (is.len >= 5) { counted++; if (summary.islandFirstLayer < 0 || is.firstL < summary.islandFirstLayer) summary.islandFirstLayer = is.firstL; }
+  summary.islands = counted;
   return done();
+
+  // record a strand that has nothing under it at all
+  function noteIsland(L, sx, sy, len, z) {
+    // same floating part as one seen a little lower down: merge
+    for (const is of islands) {
+      if (z - is.lastZ <= 3 && Math.hypot(is.x - sx, is.y - sy) < 12) {
+        is.lastZ = z; is.len += len;
+        return;
+      }
+    }
+    islands.push({ x: sx, y: sy, firstL: L, lastZ: z, len });
+  }
 
   // A bridge has to be a real span: the path may not turn much between its
   // anchors, and must stay close to the straight line joining them. (A U-turn
