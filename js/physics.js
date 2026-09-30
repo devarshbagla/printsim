@@ -24,7 +24,7 @@
 // piles up in a separate debris map: later strands land on the pile, but the
 // pile never counts as support.
 
-import { MATERIALS, limitsFor } from './materials.js';
+import { MATERIALS, limitsFor, softSeconds, HEAT_SPAN } from './materials.js';
 
 const CELL = 0.15;     // height-map resolution (mm)
 const SAMPLE = 0.4;    // mm between support samples along a strand
@@ -36,6 +36,14 @@ const LINK_TOL = 0.05; // mm; consecutive moves closer than this form one strand
 const CATCH = 0.8;
 // floating strands at most this long (mm) are judged at the end of their layer
 const SHORT = 3;
+// Loose hot strands often curl up and stick to the nozzle instead of falling
+// (the "blob of doom"): the blob rides along with the head, grabs more loose
+// plastic, and gets wiped off onto the part a little later, or drops off once
+// it's too heavy. Tangled strands fill ~55% of the ball they make.
+const BLOB_MAX = 120;   // mm3 (~0.15 g): heavier than this and it falls off
+const MAX_BLOBS = 4000;
+const BLOB_PACK = 0.55;
+export const blobRadius = (vol) => Math.max(0.6, Math.cbrt((3 * vol) / (4 * Math.PI * BLOB_PACK)));
 
 const featureOf = (m) => Math.floor(m / 4 + 1e-3);
 const widthOf = (m) => m - featureOf(m) * 4;
@@ -56,7 +64,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
   const summary = {
     failedSegments: 0, failedLength: 0, totalLength: 0, firstLayer: -1, lastLayer: -1, layersAffected: 0,
     bridges: 0, maxSag: 0, caught: 0, material: opts.material || 'PLA',
-    islands: 0, islandFirstLayer: -1,
+    islands: 0, islandFirstLayer: -1, blobs: 0, stuckLength: 0,
   };
   // Parts that start printing in mid-air (a drip hanging off a ledge, a model
   // floating above the bed): a strand with nothing held anywhere near below it
@@ -66,12 +74,16 @@ export function analyzeSupport(segs, layers, opts = {}) {
   const segSampleStart = new Uint32Array(S + 1);
   const segSamples = new Uint16Array(S);
   const pathId = new Uint32Array(S);
-  let sampleSag = new Float32Array(1 << 16), sampleDrop = new Float32Array(1 << 16);
+  let sampleSag = new Float32Array(1 << 16), sampleDrop = new Float32Array(1 << 16), sampleBlob = new Uint16Array(1 << 16);
+  const blobs = [];  // { seg, frac, x, y, z, vol }: where each nozzle blob ends up
+  let carry = null;  // the blob on the nozzle right now
+  let lastI = -1, lastIdx = 0, lastX = 0, lastY = 0; // the last sample laid (a blob still on the nozzle at the end stays there)
   let sampleCount = 0;
   const done = () => {
     segSampleStart[S] = sampleCount;
     summary.failedFraction = summary.totalLength > 0 ? summary.failedLength / summary.totalLength : 0;
-    return { segSampleStart, segSamples, pathId, sampleSag: sampleSag.subarray(0, sampleCount), sampleDrop: sampleDrop.subarray(0, sampleCount), summary };
+    summary.blobs = blobs.length;
+    return { segSampleStart, segSamples, pathId, sampleSag: sampleSag.subarray(0, sampleCount), sampleDrop: sampleDrop.subarray(0, sampleCount), sampleBlob: sampleBlob.subarray(0, sampleCount), blobs, summary };
   };
   if (!S || !NL) return done();
 
@@ -176,6 +188,35 @@ export function analyzeSupport(segs, layers, opts = {}) {
 
   let rng = 12345;
   const rand = () => { rng = (rng * 1103515245 + 12345) & 0x7fffffff; return rng / 0x7fffffff; };
+  // a separate stream for nozzle blobs, so they never change where debris lands
+  let rngB = 777;
+  const randB = () => { rngB = (rngB * 1103515245 + 12345) & 0x7fffffff; return rngB / 0x7fffffff; };
+  const softCache = new Map();
+  const heatOf = (i, h) => {
+    const f = fan ? fan[i] : 255, w = widthOf(meta[i]);
+    const key = f * 1e6 + Math.round(w * 100) * 1000 + Math.round(h * 100);
+    let v = softCache.get(key);
+    if (v === undefined) { v = Math.min(1, softSeconds(mat, f / 255, temp, w, h) / HEAT_SPAN); softCache.set(key, v); }
+    return v;
+  };
+  // does this loose run (starting at sample j) stick to the nozzle? Hot, sticky
+  // plastic and long loose strands do it more; a blob already there grabs more.
+  const sticks = (j, n, h) => {
+    let runLen = 0;
+    for (let r = j; r < n && sFall[r]; r++) runLen += sLen[r];
+    if (runLen < 1.5 || (!carry && blobs.length >= MAX_BLOBS)) return false;
+    const heat = heatOf(sSeg[j], h);
+    let pr = (mat.stick ?? 0.45) * (0.2 + 0.8 * heat) * Math.min(1, runLen / 10);
+    if (carry) pr = Math.min(0.7, 1.5 * pr + 0.15);
+    return randB() < pr;
+  };
+  const deposit = (i, sidx, x, y) => {
+    const R = blobRadius(carry.vol);
+    const g = groundAt(x, y);
+    blobs.push({ seg: i, frac: (sidx - segSampleStart[i] + 0.5) / Math.max(1, segSamples[i]), x, y, z: g + R * 0.5, vol: carry.vol });
+    addDebris(x, y, carry.vol, Math.max(R, 0.5));
+    carry = null;
+  };
   let path = 0;
 
   for (let L = 0; L < NL; L++) {
@@ -210,7 +251,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
         const k = Math.max(1, Math.ceil(len / SAMPLE));
         segSamples[i] = k;
         segSampleStart[i] = sampleCount;
-        while (sampleCount + k >= sampleSag.length) { sampleSag = grow(sampleSag, Float32Array); sampleDrop = grow(sampleDrop, Float32Array); }
+        while (sampleCount + k >= sampleSag.length) { sampleSag = grow(sampleSag, Float32Array); sampleDrop = grow(sampleDrop, Float32Array); sampleBlob = grow(sampleBlob, Uint16Array); }
         while (n + k >= sSeg.length) {
           sSeg = grow(sSeg, Int32Array); sOk = grow(sOk, Uint8Array); sX = grow(sX, Float32Array); sY = grow(sY, Float32Array);
           sLen = grow(sLen, Float32Array); sIdx = grow(sIdx, Int32Array); sFall = grow(sFall, Uint8Array); sRope = grow(sRope, Float32Array);
@@ -222,7 +263,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
           const t = (j + 0.5) / k;
           const x = x0 + (x1 - x0) * t, y = y0 + (y1 - y0) * t;
           sSeg[n] = i; sX[n] = x; sY[n] = y; sLen[n] = len / k; sIdx[n] = sampleCount; sFall[n] = 0; sRope[n] = Infinity;
-          sampleSag[sampleCount] = 0; sampleDrop[sampleCount] = 0; sampleCount++;
+          sampleSag[sampleCount] = 0; sampleDrop[sampleCount] = 0; sampleBlob[sampleCount] = 0; sampleCount++;
           if (onBed) sOk[n] = 1;
           else sOk[n] = within(x, y, r, (c) => top[c] >= need) ? 1 : within(x, y, w * 1.05, (c) => side[c] === L + 1) ? 2 : 0;
           n++;
@@ -369,18 +410,41 @@ export function analyzeSupport(segs, layers, opts = {}) {
         const c = cy(sY[j]) * W + cx(sX[j]);
         side[c] = L + 1;
       }
-      // --- stamp what held, drop what fell
-      let failedHere = false;
+      const stampHeld = (j, w) => {
+        // hinges (3) and stubs (4) hang on but droop: stamped one layer low so they
+        // don't count as support (or as a surface to catch on), otherwise overhangs
+        // could creep out ~2 mm per layer
+        const zz = (sOk[j] === 3 || sOk[j] === 4) ? z - h * 1.5 - CATCH : sOk[j] === 5 ? z : z - sampleSag[sIdx[j]];
+        stampDisk(top, sX[j], sY[j], zz, w * 0.5);
+        heldL[cy(sY[j]) * W + cx(sX[j])] = L + 1;
+      };
+      // --- stamp what held, drop what fell, and what the nozzle picks up
+      let failedHere = false, runStuck = false;
       for (let j = 0; j < n; j++) {
         const w = widthOf(meta[sSeg[j]]);
+        lastI = sSeg[j]; lastIdx = sIdx[j]; lastX = sX[j]; lastY = sY[j];
+        if (!sFall[j] && carry) {
+          // pressing on the part wipes the blob off onto it, sooner or later
+          carry.wiped += sLen[j];
+          if (carry.wiped >= carry.budget || carry.vol >= BLOB_MAX) { stampHeld(j, w); deposit(sSeg[j], sIdx[j], sX[j], sY[j]); continue; }
+        }
         if (!sFall[j]) {
-          // hinges (3) and stubs (4) hang on but droop: stamped one layer low so they
-          // don't count as support (or as a surface to catch on), otherwise overhangs
-          // could creep out ~2 mm per layer
-          const zz = (sOk[j] === 3 || sOk[j] === 4) ? z - h * 1.5 - CATCH : sOk[j] === 5 ? z : z - sampleSag[sIdx[j]];
-          stampDisk(top, sX[j], sY[j], zz, w * 0.5);
-          heldL[cy(sY[j]) * W + cx(sX[j])] = L + 1;
+          stampHeld(j, w);
         } else {
+          if (j === 0 || !sFall[j - 1]) runStuck = sticks(j, n, h);
+          if (runStuck) {
+            // curls up onto the nozzle: it rides along instead of falling here
+            if (!carry) carry = { vol: 0, wiped: 0, budget: 5 + 55 * randB() };
+            sampleBlob[sIdx[j]] = blobs.length + 1;
+            carry.vol += w * h * sLen[j];
+            sampleDrop[sIdx[j]] = 0.02; // marks it as lost plastic (doomed), not as a fall distance
+            sRope[j] = -2;
+            summary.failedLength += sLen[j];
+            summary.stuckLength += sLen[j];
+            failedHere = true;
+            if (carry.vol >= BLOB_MAX) deposit(sSeg[j], sIdx[j], sX[j], sY[j]); // too heavy: drops off right here
+            continue;
+          }
           // lands on whatever is under it as a round string of the same volume
           // (its centre one radius up, a little loft for the tangle)
           const g = groundAt(sX[j], sY[j]);
@@ -394,7 +458,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
         }
       }
       // fallen plastic piles up (after the whole strand fell, so it can't land on itself)
-      for (let j = 0; j < n; j++) if (sFall[j] && sRope[j] !== -1) {
+      for (let j = 0; j < n; j++) if (sFall[j] && sRope[j] !== -1 && sRope[j] !== -2) {
         const w = widthOf(meta[sSeg[j]]);
         addDebris(sX[j], sY[j], w * h * sLen[j], w);
       }
@@ -448,6 +512,8 @@ export function analyzeSupport(segs, layers, opts = {}) {
   summary.islandList = islands.filter(is => is.len >= 5).map(is => ({ x: is.x, y: is.y, layer: is.firstL, len: is.len }));
   for (const is of islands) if (is.len >= 5) { counted++; if (summary.islandFirstLayer < 0 || is.firstL < summary.islandFirstLayer) summary.islandFirstLayer = is.firstL; }
   summary.islands = counted;
+  // still on the nozzle when the print ends: it stays there, over the last spot
+  if (carry && lastI >= 0) deposit(lastI, lastIdx, lastX, lastY);
   return done();
 
   // record a strand that has nothing under it at all
@@ -496,7 +562,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
  */
 export function splitSegments(raw, rawLayerSeg, res, maxLen = 1.0) {
   const { start, end, meta, move, fan } = raw;
-  const { segSampleStart, segSamples, sampleSag, sampleDrop, pathId } = res;
+  const { segSampleStart, segSamples, sampleSag, sampleDrop, pathId, sampleBlob, blobs = [] } = res;
   const S = meta.length;
   // value of a per-sample quantity at fraction t along move i
   const at = (arr, i, t) => {
@@ -535,6 +601,9 @@ export function splitSegments(raw, rawLayerSeg, res, maxLen = 1.0) {
     start: new Float32Array(N * 3), end: new Float32Array(N * 3), meta: new Float32Array(N),
     move: new Uint32Array(N), fan: new Uint8Array(N), frac: new Float32Array(N), frac0: new Float32Array(N),
     drop: new Float32Array(N * 2), sag: new Float32Array(N * 2), seed: new Float32Array(N),
+    blob: new Uint16Array(N),                    // 1 + which nozzle blob this piece ends up in (0 = none)
+    blobPiece: new Uint32Array(blobs.length),    // the piece the nozzle is laying when the blob comes off
+    blobPos: new Float32Array(blobs.length * 4), // where it comes to rest (x, y, z) and its radius
   };
   const remap = new Uint32Array(S + 1);
   let o = 0;
@@ -555,10 +624,19 @@ export function splitSegments(raw, rawLayerSeg, res, maxLen = 1.0) {
         out.drop[o * 2] = endVal(sampleDrop, i, a); out.drop[o * 2 + 1] = endVal(sampleDrop, i, b);
         out.sag[o * 2] = endVal(sampleSag, i, a); out.sag[o * 2 + 1] = endVal(sampleSag, i, b);
       }
+      if (sampleBlob && active[i]) {
+        const k = segSamples[i];
+        if (k) out.blob[o] = sampleBlob[segSampleStart[i] + Math.min(k - 1, Math.floor(((a + b) / 2) * k))];
+      }
       o++;
     }
   }
   remap[S] = o;
+  for (let b = 0; b < blobs.length; b++) {
+    const B = blobs[b];
+    out.blobPiece[b] = remap[B.seg] + Math.min(pieces[B.seg] - 1, Math.floor(B.frac * pieces[B.seg]));
+    out.blobPos[b * 4] = B.x; out.blobPos[b * 4 + 1] = B.y; out.blobPos[b * 4 + 2] = B.z; out.blobPos[b * 4 + 3] = blobRadius(B.vol);
+  }
   const layerSeg = new Uint32Array(rawLayerSeg.length);
   for (let L = 0; L < rawLayerSeg.length; L++) layerSeg[L] = remap[rawLayerSeg[L]];
   return { segs: out, layerSeg };
@@ -590,6 +668,23 @@ export function simulatePhysics(parsed, material, temp) {
     firstLayerWidth: num(cfg.first_layer_extrusion_width) || 0.45,
   });
   const { segs, layerSeg } = splitSegments(raw, parsed.rawLayerSeg, res);
+  // how hot each strand is when laid, as 0..1 of HEAT_SPAN soft seconds (drives
+  // how falling plastic droops, and the wet look of fresh plastic)
+  const mat = MATERIALS[material] || MATERIALS.PLA;
+  const N = segs.meta.length;
+  segs.heat = new Uint8Array(N);
+  const cache = new Map();
+  for (let L = 0; L < NL; L++) {
+    const a = layerSeg[L], b = L + 1 < NL ? layerSeg[L + 1] : N;
+    const h = Math.max(0.05, L ? parsed.layers.z[L] - parsed.layers.z[L - 1] : parsed.layers.z[0]);
+    for (let i = a; i < b; i++) {
+      const f = segs.fan[i], m = segs.meta[i], w = m - Math.floor(m / 4 + 1e-3) * 4;
+      const key = f * 1e6 + Math.round(w * 100) * 1000 + Math.round(h * 100);
+      let v = cache.get(key);
+      if (v === undefined) { v = Math.round(255 * Math.min(1, softSeconds(mat, f / 255, temp, w || 0.45, h) / HEAT_SPAN)); cache.set(key, v); }
+      segs.heat[i] = v;
+    }
+  }
   parsed.segs = segs;
   parsed.layers.seg = layerSeg;
   parsed.support = res.summary;

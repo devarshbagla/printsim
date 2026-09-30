@@ -1,7 +1,7 @@
 // Network-first service worker: always tries fresh files (so updates land
 // immediately) but falls back to cache so the app opens with no signal
 // (like in a basement makerspace).
-const CACHE = 'printsim-v14';
+const CACHE = 'printsim-v15';
 const CORE = [
   './', 'index.html', 'css/style.css', 'manifest.webmanifest', 'icons/icon.svg',
   'js/app.js', 'js/renderer.js', 'js/timeline.js', 'js/gcode.js', 'js/bgcode.js',

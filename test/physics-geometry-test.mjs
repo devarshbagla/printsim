@@ -16,7 +16,8 @@ function samplesOf(segs, res, i) {
   const x0 = segs.start[i * 3], y0 = segs.start[i * 3 + 1], x1 = segs.end[i * 3], y1 = segs.end[i * 3 + 1];
   for (let j = 0; j < k; j++) {
     const t = (j + 0.5) / k;
-    out.push({ x: x0 + (x1 - x0) * t, y: y0 + (y1 - y0) * t, drop: res.sampleDrop[base + j], sag: res.sampleSag[base + j] });
+    out.push({ x: x0 + (x1 - x0) * t, y: y0 + (y1 - y0) * t, drop: res.sampleDrop[base + j], sag: res.sampleSag[base + j],
+      blob: res.sampleBlob ? res.sampleBlob[base + j] : 0, len: Math.hypot(x1 - x0, y1 - y0) / k });
   }
   return out;
 }
@@ -163,13 +164,26 @@ const far = [[60, 60, 70, 60, 5]]; // keeps an otherwise empty layer from being 
   const { S, layers } = build(L);
   const res = analyzeSupport(S, layers, { material: 'PLA', temp: 215 });
   const zs = Array.from(layers.z), first = zs.findIndex((z) => z > 4.95), last = zs.length - 1;
-  const restOf = (Li) => { const zz = zs[Li]; return layerSamples(S, layers, res, Li).map((q) => zz - 0.1 - q.drop); };
+  // (plastic that balled up on the nozzle rides away instead of landing here)
+  const restOf = (Li) => { const zz = zs[Li]; return layerSamples(S, layers, res, Li).filter((q) => !q.blob).map((q) => zz - 0.1 - q.drop); };
   const avg = (a) => a.reduce((x, y) => x + y, 0) / a.length;
   const r1 = avg(restOf(first)), rN = avg(restOf(last));
   const plastic = 10 * 0.2; // mm of solid plastic stacked
-  check('fallen: everything floating falls', layerSamples(S, layers, res, first).every((q) => q.drop > 3));
+  check('fallen: everything floating falls', layerSamples(S, layers, res, first).every((q) => q.drop > 3 || q.blob));
   check('fallen: first layer lands on the bed', r1 > 0.05 && r1 < 0.35, `centre ${r1.toFixed(2)} mm up`);
   check('fallen: pile holds the plastic that fell, not 3x it', rN > plastic * 0.7 && rN < plastic * 1.35, `10 layers (${plastic} mm of plastic) pile to ${rN.toFixed(2)} mm`);
+
+  // ---------------------------------------------------------------- 7. nozzle blobs
+  // loose plastic that sticks to the nozzle ends up in a blob, all of it
+  let stuck = 0;
+  for (let Li = first; Li <= last; Li++) for (const q of layerSamples(S, layers, res, Li)) if (q.blob) stuck += q.len * 0.45 * 0.2;
+  const inBlobs = res.blobs.reduce((a, b) => a + b.vol, 0);
+  check('blobs: some loose PLA balls up on the nozzle', res.blobs.length > 0 && stuck > 0, `${res.blobs.length} blob(s), ${stuck.toFixed(1)} mm3`);
+  check('blobs: every bit that stuck is in a blob (volume kept)', Math.abs(inBlobs - stuck) < 1e-3 * Math.max(1, stuck), `${inBlobs.toFixed(2)} vs ${stuck.toFixed(2)} mm3`);
+  check('blobs: none much heavier than what drops off', res.blobs.every((b) => b.vol < 125), `max ${Math.max(0, ...res.blobs.map((b) => b.vol)).toFixed(1)} mm3`);
+  const petg = analyzeSupport(S, layers, { material: 'PETG', temp: 240 });
+  check('blobs: PETG sticks to the nozzle more than PLA', petg.summary.stuckLength > res.summary.stuckLength,
+    `PETG ${petg.summary.stuckLength.toFixed(0)} mm vs PLA ${res.summary.stuckLength.toFixed(0)} mm`);
 }
 {
   const r = parseGcode(new Uint8Array(readFileSync(new URL('../samples/mushroom-no-supports.gcode', import.meta.url))));

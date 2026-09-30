@@ -246,7 +246,9 @@ function setMode(m) {
   if (m === 'setup') applyScrub();
   view.setGhost(ghostOn());
   if (m === 'run') { view.setWarnTint(0); view.setPhysics(prefs.physics); scheduleGhostHint(); } else hideGhostHint();
-  view.maxFps = m === 'run' ? 15 : 0; // a live print moves slowly: 15 fps is plenty
+  // a live print moves at real speed: 30 fps is smooth and keeps a phone that
+  // sits on the page for hours cool (dragging the view still renders at full rate)
+  view.maxFps = m === 'run' ? 30 : 0;
   if (m === 'done') { view.setHead(parsed.segs.move.length, null, false, false); view.setSimTime(1e9); view.setWarnTint(0); view.setScreen({ title: 'finished', big: '100%', line1: 'Print done', line2: '', progress: 1, accent: accentHex() }); }
   if (m === 'empty') document.title = 'printsim';
   lastUi = 0;
@@ -364,6 +366,10 @@ const preview = { t: null, playing: false, lastWall: 0 };
 const printSpan = () => Math.max(tl.total - tl.startupEnd, 1);
 let rec = null; // timelapse video being recorded (see "timelapse video" below)
 const playSpeed = () => (rec ? rec.speed : prefs.speed);
+// Sped up, the drawn head trails the real one by this many wall seconds (a
+// critically damped spring in the renderer) so it glides instead of teleporting:
+// 10x 0.04 s, 50x 0.07 s, 200x 0.09 s, 1000x 0.12 s.
+const motionTau = (speed) => (speed <= 1 ? 0 : Math.min(0.12, 0.012 * Math.log2(speed)));
 
 function applyScrub() {
   if (!parsed || !tl) return;
@@ -386,6 +392,7 @@ function renderPreview() {
   }
   const st = stateAt(parsed, tl, preview.t);
   view.setWarnTint(0);
+  view.setMotionSmoothing(motionTau(playSpeed()));
   view.setSimTime(preview.t, FALL_SECONDS);
   if (prefs.layerMode) {
     // like a printer timelapse: one frame per finished layer, nozzle parked
@@ -454,7 +461,9 @@ function renderSupportWarning() {
   if (rep) {
     const when = rep.tFail < 60 ? 'right at the start' : `about ${fmtDur(rep.tFail)} in`;
     const at = `about ${Math.max(1, Math.round(rep.pctFail))}% through`;
-    const cost = `Roughly ${fmtGrams(rep.spaghettiG)} ends up as spaghetti, and the ${fmtGrams(rep.afterG)} printed from then on is at risk.`;
+    // loose strands that curl up onto the nozzle get dragged along and wiped off elsewhere
+    const blobby = (sp.blobs || 0) >= 3 && (sp.stuckLength || 0) > 0.05 * sp.failedLength;
+    const cost = `Roughly ${fmtGrams(rep.spaghettiG)} ends up as spaghetti${blobby ? ' (some of it balls up on the nozzle and gets dragged onto other parts of the print)' : ''}, and the ${fmtGrams(rep.afterG)} printed from then on is at risk.`;
     head = `Spaghetti alert: goes wrong ${when} (layer ${rep.layer + 1})`;
     if (n > 0) {
       body = `${n === 1 ? 'One part starts' : `${n} parts start`} printing in mid-air with nothing under ${n === 1 ? 'it' : 'them'}${why}, the first ${at}. ${cost}`;
@@ -644,6 +653,7 @@ function renderDone(text) { $('done-text').textContent = text || ''; }
 function updateRunUI(t) {
   const s = simNow(t);
   const st = stateAt(parsed, tl, s);
+  view.setMotionSmoothing(0); // real time: the head is drawn exactly where it is
   view.setHead(st.segHead, st.head, true, st.extruding && run.running);
   view.setSimTime(s, FALL_SECONDS);
   if (t - lastUi < 200) return;
@@ -680,7 +690,7 @@ function updateRunUI(t) {
 
   $('st-layer').textContent = `${st.layer + 1} / ${st.layerCount}`;
   show('btn-cal', !ended && remaining > 60);
-  $('st-z').textContent = st.startup ? '—' : `${st.z.toFixed(2)} mm`;
+  $('st-z').textContent = st.startup ? '-' : `${st.z.toFixed(2)} mm`;
   let now_ = st.phase;
   if (!now_) {
     now_ = st.feature === Feature.Custom ? 'Purge line' : FeatureNames[st.feature];

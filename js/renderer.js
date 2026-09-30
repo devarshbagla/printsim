@@ -46,7 +46,11 @@ const vert = /* glsl */`
   attribute vec2 iTime;       // sim time each end of this piece is extruded
   attribute float iSeed;      // per-strand seed, so neighbouring strands fold differently
   attribute vec2 iSag;        // bridge droop at start/end of this piece (mm)
+  attribute float iHeat;      // how long the strand stays soft once laid (x 8 s)
+  attribute float iBlob;      // 1 + the nozzle blob this piece balls up in (0 = none)
   uniform float uCurl;        // material: how wild fallen strands get
+  uniform vec3 uNozzle;       // drawn nozzle tip (gcode coords)
+  uniform sampler2D uBlobs;   // per blob, two texels: (rest x, y, z, radius), (time it comes off)
   uniform float uHead;
   uniform float uSimTime;
   uniform float uFallTime;    // sim seconds a fall takes (fixed: faster playback = faster falls)
@@ -74,6 +78,7 @@ const vert = /* glsl */`
   varying vec3 vColor;
   varying float vHot;
   varying float vDoom;
+  varying float vSoft;
 
   // Smooth wobble so fallen strands curl like spaghetti. It depends only on the
   // ORIGINAL position of a point and its strand's seed, so the shared end of two
@@ -85,14 +90,34 @@ const vert = /* glsl */`
     float c = cos(a), s = sin(a);
     return vec2(c * w.x - s * w.y, s * w.x + c * w.y);
   }
-  // fall of one END of a piece: pulled off by gravity (accelerating), hits the
-  // pile below, bounces back up a touch and settles
-  float fallOf(float t0) {
-    float p = clamp((uSimTime - t0) / uFallTime, 0.0, 1.0);
-    if (p < 0.72) { float q = p / 0.72; return q * q; }
-    float b = (p - 0.72) / 0.28;
-    return 1.0 - 0.07 * sin(b * 3.14159) * (1.0 - b);
+  // Fall of one END of a piece, by how hot the strand still is (heat 0..1).
+  // Cold, stiff plastic (lots of fan) juts out for a moment, then drops like a
+  // stick: gravity, a hard landing, a little bounce. Hot plastic is still soft:
+  // it lets go at once but oozes down slower, like honey, and slumps onto the
+  // pile without bouncing.
+  float fallOf(float t0, float heat) {
+    float T = uFallTime * (1.0 + 1.4 * heat);
+    float hold = 0.18 * (1.0 - heat);
+    float p = clamp(((uSimTime - t0) / T - hold) / (1.0 - hold), 0.0, 1.0);
+    float grav;
+    if (p < 0.72) { float q = p / 0.72; grav = q * q; }
+    else { float b = (p - 0.72) / 0.28; grav = 1.0 - 0.07 * (1.0 - heat) * sin(b * 3.14159) * (1.0 - b); }
+    return mix(grav, smoothstep(0.0, 1.0, p), heat);
   }
+
+  // A strand wound into a ball of radius R (a nozzle blob). Smooth in the
+  // strand's original position, so neighbouring pieces stay joined and a 1 mm
+  // piece stays about 1 mm long (its drawn volume doesn't change).
+  vec3 ball(vec3 g, float seed, float R, float squash) {
+    float a = seed * 6.2832, f = 1.6 / max(R, 0.5);
+    vec3 q = vec3(
+      sin(g.x * f + g.y * f * 0.61 + g.z * 1.3 + a) + 0.5 * sin(g.y * f * 2.3 - g.x * f * 1.7 + g.z * 3.1 + a * 2.0),
+      sin(g.y * f * 1.13 - g.x * f * 0.47 + g.z * 1.9 + a * 1.3) + 0.5 * sin(g.x * f * 2.1 + g.y * f * 1.9 - g.z * 2.7 + a * 0.7),
+      sin((g.x + g.y) * f * 0.83 - g.z * 2.2 - a) + 0.5 * sin(g.x * f * 1.9 - g.y * f * 2.6 + g.z * 2.3 + a * 1.9));
+    q /= max(1.0, length(q) / 1.25);   // pulled into a ball, smoothly
+    return R * 0.72 * vec3(q.xy, q.z * squash);
+  }
+  vec4 blobTexel(int k) { return texelFetch(uBlobs, ivec2(k % 1024, k / 1024), 0); }
 
   vec3 toWorld(vec3 g) { return vec3(g.x - uCenter.x, g.z, -(g.y - uCenter.y)); }
 
@@ -128,14 +153,34 @@ const vert = /* glsl */`
     if (uPhysics > 0.5) { s.z -= iSag.x; e.z -= iSag.y; }
     float falling = 0.0;
     float L0 = length(e.xy - s.xy);   // length before it falls (curling stretches it)
-    if (uPass < 0.5 && vDoom > 0.5) {
+    float char_ = 0.0;
+    if (uPass < 0.5 && uPhysics > 0.5 && iBlob > 0.5) {
+      // balled up on the nozzle: winds onto it right after it's laid, rides along
+      // with the head, and gets wiped off onto the part (or drops) at its time
+      int k = 2 * (int(iBlob + 0.5) - 1);
+      vec4 A = blobTexel(k);
+      float tOff = blobTexel(k + 1).x, R = A.w;
+      float wT = uFallTime * 0.6;
+      float ws = smoothstep(0.0, 1.0, (uSimTime - iTime.x) / wT);
+      float we = smoothstep(0.0, 1.0, (uSimTime - iTime.y) / wT);
+      float off = clamp((uSimTime - tOff) / (uFallTime * 0.5), 0.0, 1.0);
+      vec3 C = mix(uNozzle + vec3(0.0, 0.0, R * 0.75), A.xyz, uSimTime >= tOff ? off * off : 0.0);
+      float squash = mix(1.0, 0.55, uSimTime >= tOff ? off : 0.0);
+      s = mix(s, C + ball(iStart, iSeed, R, squash), ws);
+      e = mix(e, C + ball(iEnd, iSeed, R, squash), we);
+      falling = max(ws, we);
+      // sitting on a 200+ C nozzle for minutes browns it
+      char_ = clamp((min(uSimTime, tOff) - iTime.y) / 90.0, 0.0, 0.4);
+    } else if (uPass < 0.5 && vDoom > 0.5) {
       // each end falls on its own clock (the moment the nozzle laid it) by its own
-      // distance; the strand stays attached at the nozzle and at any hinge
+      // distance; the strand stays attached at the nozzle and at any hinge. Soft
+      // (hot) strands drape and coil gently; cold ones are stiff and curl wildly.
       vec3 s0 = iStart, e0 = iEnd;
-      float fs = fallOf(iTime.x), fe = fallOf(iTime.y);
+      float fs = fallOf(iTime.x, iHeat), fe = fallOf(iTime.y, iHeat);
       falling = max(fs, fe);
-      s.xy += curl(s0, iSeed) * min(0.25 + iDrop.x * 0.22, 4.0) * uCurl * fs * step(0.0001, iDrop.x);
-      e.xy += curl(e0, iSeed) * min(0.25 + iDrop.y * 0.22, 4.0) * uCurl * fe * step(0.0001, iDrop.y);
+      float wild = uCurl * mix(1.2, 0.7, iHeat);
+      s.xy += curl(s0, iSeed) * min(0.25 + iDrop.x * 0.22, 4.0) * wild * fs * step(0.0001, iDrop.x);
+      e.xy += curl(e0, iSeed) * min(0.25 + iDrop.y * 0.22, 4.0) * wild * fe * step(0.0001, iDrop.y);
       s.z -= iDrop.x * fs;
       e.z -= iDrop.y * fe;
     }
@@ -186,6 +231,10 @@ const vert = /* glsl */`
     int fi = int(feat);
     vColor = uColorMode > 0.5 ? (vDoom > 0.5 ? vec3(1.0, 0.16, 0.12) : uPalette[fi]) : uColor;
     if (vDoom > 0.5 && uPass < 0.5) vColor = mix(vColor, vec3(1.0, 0.16, 0.12), uWarnTint);
+    if (uColorMode < 0.5) vColor = mix(vColor, vec3(0.3, 0.17, 0.07), char_);
+    // still soft from the nozzle (for as long as this strand takes to cool): wet gloss
+    float age = uSimTime - iTime.y;
+    vSoft = uPass < 0.5 && age >= 0.0 ? uGlow * (1.0 - smoothstep(0.0, max(iHeat * 8.0, 0.1), age)) : 0.0;
     // freshly extruded plastic is a touch brighter right behind the nozzle
     vHot = uPass < 0.5 ? uGlow * 0.4 * exp(-(headIdx - idx) / 10.0) : 0.0;
     gl_Position = projectionMatrix * viewMatrix * vec4(vWorld, 1.0);
@@ -212,6 +261,7 @@ const frag = /* glsl */`
   varying vec3 vColor;
   varying float vHot;
   varying float vDoom;
+  varying float vSoft;
 
   // Which point of the stadium profile (flat top/bottom of half-width c, round
   // sides of radius r) a ray at offset t across the strand hits first.
@@ -275,6 +325,7 @@ const frag = /* glsl */`
 
     vec3 base = vColor;
     float rough = vIron > 0.5 ? max(uRough * 0.45, 0.12) : uRough;
+    rough = mix(rough, max(rough * 0.45, 0.1), vSoft); // molten plastic looks wet
     float a = rough * rough;
     float NdV = clamp(dot(N, V), 1e-3, 1.0);
     vec3 F0 = mix(vec3(0.045), base, uMetal);
@@ -322,7 +373,7 @@ const frag = /* glsl */`
     vec3 Fr = F0 + (max(vec3(1.0 - rough), F0) - F0) * pow(1.0 - NdV, 5.0);
     vec3 env = studio(reflect(-V, N), rough) * Fr * ao * 0.8;
     vec3 col = base * diff * (1.0 - Fr * 0.5) * (1.0 - uMetal * 0.6) + spec + env;
-    col = mix(col, min(base * 1.35 + vec3(0.08), vec3(1.0)), clamp(vHot, 0.0, 0.4));
+    col = mix(col, min(base * 1.35 + vec3(0.08), vec3(1.0)), clamp(vHot + vSoft * 0.12, 0.0, 0.4));
     // soft shoulder instead of hard clipping on white filament and highlights
     float m = max(col.r, max(col.g, col.b));
     if (m > 0.8) col *= (0.8 + (1.0 - exp(-(m - 0.8) * 2.5)) * 0.2) / m;
@@ -366,7 +417,12 @@ export class PrintView {
       uPxScale: { value: 1000 },
       uRough: { value: 0.42 },
       uMetal: { value: 0 },
+      uNozzle: { value: new THREE.Vector3() }, // drawn nozzle tip, gcode coords (blobs ride on it)
+      uBlobs: { value: null },                 // blob table (see setBlobs)
+      uBlobW: { value: 1 },
     };
+    this.motionTau = 0;
+    this.settled = true;
     // live prints don't need 60 fps: capping the frame rate keeps a phone that sits
     // on the page for hours cool (dragging the view still renders at full rate)
     this.maxFps = 0;
@@ -460,21 +516,72 @@ export class PrintView {
     this.dirty = true;
   }
 
+  // Where the printer should be (target) and where it's drawn (shown). At 1x the
+  // two are the same. Sped up, the real head crosses the bed several times per
+  // frame, so drawing its exact spot each frame makes it teleport around in
+  // little jerks; instead the drawn head follows the real one on a critically
+  // damped spring (no overshoot), which reads as smooth fast motion.
   _pose() {
     const pr = this.printer;
     if (!pr) return;
-    if (!this.printerView) { this.nozzle.visible = !!(this.lastHead && this.lastHead.show); return; }
-    this.nozzle.visible = false;
     const h = this.lastHead;
     let hx, hy, bz, ex = false;
     if (h && h.pos && h.show) {
       hx = h.pos[0] - this.center.x; hy = h.pos[2]; bz = h.pos[1] - this.center.y; ex = h.extruding;
-    } else {
+    } else if (this.printerView) {
       // parked: head to the right, above the print, bed centred
       const top = this.bbox && isFinite(this.bbox.max[2]) ? this.bbox.max[2] : 0;
       hx = this.bedW / 2 - 5; hy = Math.max(top + 25, 40); bz = 0;
+    } else {
+      hx = this.shown ? this.shown.x : 0; hy = this.shown ? this.shown.y : 0; bz = this.shown ? this.shown.z : 0;
     }
-    pr.setPose(hx, hy, bz, ex);
+    this.target = { x: hx, y: hy, z: bz, ex };
+    if (!this.shown || !(this.motionTau > 0)) {
+      this.shown = { x: hx, y: hy, z: bz, vx: 0, vy: 0, vz: 0 };
+      this.settled = true;
+      this._applyPose();
+    } else {
+      this.settled = false;
+    }
+  }
+
+  /** how long (wall seconds) the drawn head takes to catch up; 0 = exact */
+  setMotionSmoothing(tau) { this.motionTau = Math.max(0, tau || 0); }
+
+  _stepPose(now) {
+    if (this.settled || !this.shown || !this.target) { this.lastPoseStep = now; return; }
+    const dt = Math.min(Math.max((now - (this.lastPoseStep || now)) / 1000, 0), 0.1);
+    this.lastPoseStep = now;
+    const w = 2 / Math.max(this.motionTau, 1e-3), e = Math.exp(-w * dt);
+    const S = this.shown, T = this.target;
+    let moving = false;
+    for (const [k, v] of [['x', 'vx'], ['y', 'vy'], ['z', 'vz']]) {
+      const d = S[k] - T[k], tmp = (S[v] + w * d) * dt;
+      S[k] = T[k] + (d + tmp) * e;
+      S[v] = (S[v] - w * tmp) * e;
+      if (Math.abs(S[k] - T[k]) > 0.01 || Math.abs(S[v]) > 0.05) moving = true;
+    }
+    if (!moving) { S.x = T.x; S.y = T.y; S.z = T.z; S.vx = S.vy = S.vz = 0; this.settled = true; }
+    this._applyPose();
+    this.dirty = true;
+  }
+
+  _applyPose() {
+    const S = this.shown, T = this.target;
+    if (!S || !T) return;
+    const u = this.uniforms.uNozzle.value;
+    u.set(S.x + this.center.x, S.z + this.center.y, S.y);
+    if (this.printerView) {
+      this.nozzle.visible = false;
+      this.printer.setPose(S.x, S.y, S.z, T.ex);
+      return;
+    }
+    const h = this.lastHead;
+    this.nozzle.visible = !!(h && h.show);
+    if (this.nozzle.visible) {
+      this.nozzle.position.set(S.x, S.y, -S.z);
+      this.nozzleGlow.intensity = T.ex ? 2.5 : 0;
+    }
   }
 
   setScreen(opts) { if (this.printer && this.printer.setScreen(opts)) this.dirty = true; }
@@ -503,6 +610,9 @@ export class PrintView {
     const aDrop = new THREE.InstancedBufferAttribute(segs.drop || new Float32Array(segs.meta.length * 2), 2);
     const aSeed = new THREE.InstancedBufferAttribute(segs.seed || new Float32Array(segs.meta.length), 1);
     const aSag = new THREE.InstancedBufferAttribute(segs.sag || new Float32Array(segs.meta.length * 2), 2);
+    const aHeat = new THREE.InstancedBufferAttribute(segs.heat || new Uint8Array(segs.meta.length), 1, true);
+    const aBlob = new THREE.InstancedBufferAttribute(segs.blob || new Uint16Array(segs.meta.length), 1, false);
+    this._setBlobs(segs);
     this.aTime = new THREE.InstancedBufferAttribute(new Float32Array(segs.meta.length * 2), 2);
     this.aTime.setUsage(THREE.DynamicDrawUsage);
     const corner = new THREE.BufferAttribute(new Float32Array([0, -1, 0, 1, 1, -1, 1, 1]), 2);
@@ -520,6 +630,8 @@ export class PrintView {
       g.setAttribute('iTime', this.aTime);
       g.setAttribute('iSag', aSag);
       g.setAttribute('iSeed', aSeed);
+      g.setAttribute('iHeat', aHeat);
+      g.setAttribute('iBlob', aBlob);
       g.instanceCount = this.segCount;
       const u = { ...this.uniforms, uPass: { value: pass } };
       const m = new THREE.ShaderMaterial({
@@ -601,16 +713,31 @@ export class PrintView {
     const u = this.uniforms;
     if (u.uHead.value !== segHead) { u.uHead.value = segHead; this.dirty = true; }
     if (this.mesh) this.mesh.geometry.instanceCount = Math.min(this.segCount, Math.floor(segHead) + 1);
+    const lh = this.lastHead;
+    const same = lh && lh.show === !!show && lh.extruding === !!extruding &&
+      (headPos ? lh.pos && lh.pos[0] === headPos[0] && lh.pos[1] === headPos[1] && lh.pos[2] === headPos[2] : !lh.pos);
+    if (same) return;
     this.lastHead = { pos: headPos ? headPos.slice() : null, show: !!show, extruding: !!extruding };
-    if (this.printerView) { this._pose(); this.dirty = true; return; }
-    this.nozzle.visible = !!show;
-    if (show && headPos) {
-      const p = this.nozzle.position;
-      const nx = headPos[0] - this.center.x, ny = headPos[2], nz = -(headPos[1] - this.center.y);
-      if (p.x !== nx || p.y !== ny || p.z !== nz) { p.set(nx, ny, nz); this.dirty = true; }
-      const gi = extruding ? 2.5 : 0;
-      if (this.nozzleGlow.intensity !== gi) { this.nozzleGlow.intensity = gi; this.dirty = true; }
+    this._pose();
+    this.dirty = true;
+  }
+
+  // Nozzle blobs: two RGBA float texels each, 1024 per row. (rest x, y, z,
+  // radius) from the physics pass; the time it comes off the nozzle is the time
+  // the nozzle lays the piece it happens on, filled in by setSegTimes.
+  _setBlobs(segs) {
+    const B = segs.blobPiece ? segs.blobPiece.length : 0;
+    const texels = Math.max(1, B * 2), w = Math.min(1024, texels), h = Math.ceil(texels / 1024);
+    const data = new Float32Array(w * h * 4);
+    for (let b = 0; b < B; b++) {
+      data.set(segs.blobPos.subarray(b * 4, b * 4 + 4), b * 8);
+      data[b * 8 + 4] = 1e9;
     }
+    if (this.blobTex) this.blobTex.dispose();
+    this.blobTex = new THREE.DataTexture(data, w, h, THREE.RGBAFormat, THREE.FloatType);
+    this.blobTex.needsUpdate = true;
+    this.blobPiece = B ? segs.blobPiece : null;
+    this.uniforms.uBlobs.value = this.blobTex;
   }
 
   /** Sim time at which each segment finishes (drives the fall animation). */
@@ -618,6 +745,11 @@ export class PrintView {
     if (!this.aTime || times.length !== this.aTime.array.length) return;
     this.aTime.array.set(times);
     this.aTime.needsUpdate = true;
+    if (this.blobPiece && this.blobTex) {
+      const d = this.blobTex.image.data;
+      for (let b = 0; b < this.blobPiece.length; b++) d[b * 8 + 4] = times[this.blobPiece[b] * 2];
+      this.blobTex.needsUpdate = true;
+    }
     this.dirty = true;
   }
   setSimTime(t, fallTime = 0.8) {
@@ -663,13 +795,23 @@ export class PrintView {
     if (this.ghost && this.ghostOn === false) this.ghost.visible = false;
     const t = performance.now();
     const interacting = t < this.interactUntil;
-    if (this.dirty && this.maxFps > 0 && !interacting && t - this.lastRender < 1000 / this.maxFps) return;
-    if (this.dirty) {
+    if (!this.settled) this.dirty = true;
+    if (!this.dirty) return;
+    if (this.maxFps > 0 && !interacting) {
+      // even frame pacing: the next frame is due one interval after the last one
+      // was DUE (not drawn), with a few ms of slack for display jitter; otherwise
+      // a 30 fps cap on a 60 Hz screen alternates 2- and 3-frame gaps and the
+      // head visibly stutters
+      const iv = 1000 / this.maxFps;
+      if (t - this.lastRender < iv - 4) return;
+      this.lastRender = t - this.lastRender < iv * 2 ? this.lastRender + iv : t;
+    } else {
       this.lastRender = t;
-      this.renderer.render(this.scene, this.camera);
-      this.dirty = false;
-      if (this.onRendered) this.onRendered(); // same task: the WebGL buffer is still readable
     }
+    this._stepPose(t);
+    this.renderer.render(this.scene, this.camera);
+    this.dirty = false;
+    if (this.onRendered) this.onRendered(); // same task: the WebGL buffer is still readable
   }
 }
 

@@ -19,51 +19,67 @@
 // curl:      how wild fallen strands get (stringy/floppy materials curl more)
 // hotAbove / hotPenalty: printing hotter than the Prusa profile temperature
 //            (+~5 C margin) costs overhang/bridge performance per degree
+// setC:      temperature (C) below which a strand holds its shape: about the
+//            glass transition (PLA ~60, PETG ~80, ABS/ASA ~100, PC ~145); PA and
+//            TPU use their heat-deflection / softening point instead
+// stick:     how readily loose hot strands grab the nozzle (0..1): PETG is
+//            notorious for it, PLA barely does it
+// temp:      nozzle temperature of the Prusa MINI profile, used when the file
+//            doesn't say
 
 export const MATERIALS = {
   PLA: {
     name: 'PLA', refFan: 1.0, overhang: [68, 55], bridge: [35, 10], cantilever: [1.8, 0.8],
     sag: [0.0035, 0.012], curl: 1.0, hotAbove: 225, hotPenalty: 0.012,
+    setC: 60, stick: 0.3, temp: 215,
     note: 'PLA loves cooling: overhangs and bridges are judged against the part-fan speed on every strand.',
   },
   PETG: {
     name: 'PETG', refFan: 0.5, overhang: [60, 52], bridge: [20, 10], cantilever: [1.2, 0.7],
     sag: [0.009, 0.016], curl: 1.35, hotAbove: 255, hotPenalty: 0.008,
+    setC: 80, stick: 0.8, temp: 240,
     note: 'PETG bridges and overhangs worse than PLA and sags more; judged against its usual ~50% fan.',
   },
   ABS: {
     name: 'ABS', refFan: 0.15, overhang: [57, 54], bridge: [15, 12], cantilever: [1.1, 0.9],
     sag: [0.008, 0.011], curl: 1.1, hotAbove: 260, hotPenalty: 0.006,
+    setC: 100, stick: 0.4, temp: 255,
     note: 'ABS prints with little cooling (~15% fan), so overhangs are judged conservatively.',
   },
   ASA: {
     name: 'ASA', refFan: 0.2, overhang: [57, 54], bridge: [15, 12], cantilever: [1.1, 0.9],
     sag: [0.008, 0.011], curl: 1.1, hotAbove: 265, hotPenalty: 0.006,
+    setC: 100, stick: 0.4, temp: 260,
     note: 'ASA behaves like ABS: ~20% fan, moderate overhangs.',
   },
   PC: {
     name: 'PC', refFan: 0.2, overhang: [56, 52], bridge: [14, 10], cantilever: [1.0, 0.7],
     sag: [0.01, 0.014], curl: 1.05, hotAbove: 280, hotPenalty: 0.005,
+    setC: 145, stick: 0.5, temp: 275,
     note: 'Polycarbonate runs hot with ~20% fan, so overhangs are limited.',
   },
   PA: {
     name: 'Nylon (PA)', refFan: 0.2, overhang: [55, 50], bridge: [14, 9], cantilever: [1.0, 0.7],
     sag: [0.011, 0.016], curl: 1.25, hotAbove: 290, hotPenalty: 0.005,
+    setC: 70, stick: 0.55, temp: 285,
     note: 'Nylon is soft when hot and sags on long spans.',
   },
   TPU: {
     name: 'TPU / flex', refFan: 0.5, overhang: [52, 48], bridge: [8, 5], cantilever: [0.6, 0.4],
     sag: [0.03, 0.045], curl: 1.9, hotAbove: 245, hotPenalty: 0.01,
+    setC: 80, stick: 0.7, temp: 240,
     note: 'Flexible filament barely bridges and droops easily.',
   },
   PVA: {
     name: 'PVA / support', refFan: 1.0, overhang: [55, 50], bridge: [12, 8], cantilever: [0.8, 0.6],
     sag: [0.012, 0.018], curl: 1.2, hotAbove: 225, hotPenalty: 0.01,
+    setC: 75, stick: 0.5, temp: 215,
     note: 'Soluble support material: weak overhangs.',
   },
   GENERIC: {
     name: 'Other', refFan: 0.5, overhang: [60, 52], bridge: [18, 10], cantilever: [1.2, 0.7],
     sag: [0.008, 0.014], curl: 1.2, hotAbove: 250, hotPenalty: 0.008,
+    setC: 75, stick: 0.45, temp: 230,
     note: 'Unknown filament: using middle-of-the-road limits.',
   },
 };
@@ -110,6 +126,26 @@ export function limitsFor(mat, fan01, temp, cool = 1) {
     sag: lerp(mat.sag) / q,
   };
 }
+
+// How long a freshly laid strand stays soft (seconds), from Newton cooling of a
+// thin round strand with the same cross-section (w x h):
+//   t = rho*c * r / (2*h) * ln((T_nozzle - T_air) / (T_set - T_air))
+// rho*c ~2.0 MJ/(m3 K) for the common filaments (PLA 1.24 g/cm3 x 1.8 J/gK),
+// T_air 35 C (air over a heated bed). The heat transfer coefficient h goes from
+// ~50 W/m2K in still air (natural convection + radiation around a 0.4 mm strand)
+// to ~400 W/m2K in the part fan's jet at 100% (forced convection over a thin
+// cylinder, Hilpert correlation at ~5 m/s). PLA at 100% fan: ~1 s. Fan off: ~7 s.
+const RHO_C = 2.0e6, T_AIR = 35, H_STILL = 50, H_FAN = 400;
+export function softSeconds(mat, fan01, temp, w = 0.45, h = 0.2) {
+  const Tn = temp || mat.temp || 215, Ts = mat.setC || 70;
+  if (Tn <= Ts + 1) return 0.1;
+  const r = Math.sqrt((w * h) / Math.PI) * 1e-3;            // m
+  const hc = H_STILL + (H_FAN - H_STILL) * Math.max(0, Math.min(1, fan01));
+  const tau = (RHO_C * r) / (2 * hc);
+  return Math.max(0.1, Math.min(20, tau * Math.log((Tn - T_AIR) / (Ts - T_AIR))));
+}
+/** the renderer's 0..1 heat value: soft seconds over this */
+export const HEAT_SPAN = 8;
 
 // How the plastic looks (roughness 0..1, metal 0..1). Base look per material,
 // then the filament's profile name: silk filaments are glossy with coloured,

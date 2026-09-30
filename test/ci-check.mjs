@@ -111,7 +111,7 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   let ext = 0, drawn = 0;
   for (let i = 0; i < N; i++) {
     const d0 = s.drop[i * 2], d1 = s.drop[i * 2 + 1];
-    if (!(d0 > 0 && d1 > 0)) continue;
+    if (!(d0 > 0 && d1 > 0) || s.blob[i]) continue; // blob pieces are checked below
     const w = s.meta[i] - Math.floor(s.meta[i] / 4 + 1e-3) * 4, h = lh[i];
     const dx = s.end[i * 3] - s.start[i * 3], dy = s.end[i * 3 + 1] - s.start[i * 3 + 1], dz = (s.end[i * 3 + 2] - d1) - (s.start[i * 3 + 2] - d0);
     const L0 = Math.hypot(dx, dy), L = Math.hypot(dx, dy, dz);
@@ -125,6 +125,38 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   const shader = readFileSync(`${here}js/renderer.js`, 'utf8').replace(/\s+/g, ' ');
   check('renderer draws fallen strands with that same thickness rule',
     shader.includes('sqrt(width * lh / 3.14159) * sqrt(clamp(L0 / max(L, 1e-4), 0.25, 1.0))'));
+
+  // plastic that balls up on the nozzle: all of it lands somewhere, in a ball of its own volume
+  const B = s.blobPiece.length;
+  let stuck = 0;
+  const perBlob = new Float64Array(B);
+  for (let i = 0; i < N; i++) if (s.blob[i]) {
+    const w = s.meta[i] - Math.floor(s.meta[i] / 4 + 1e-3) * 4, h = lh[i];
+    const v = w * h * Math.hypot(s.end[i * 3] - s.start[i * 3], s.end[i * 3 + 1] - s.start[i * 3 + 1]);
+    stuck += v; perBlob[s.blob[i] - 1] += v;
+  }
+  const blobsOk = B > 0 && s.blob.every((b) => b <= B) && Array.from(s.blobPiece).every((k) => k < N);
+  check('mushroom: some spaghetti balls up on the nozzle (PLA, a minority of it)', blobsOk && stuck > 0.03 * ext && stuck < 0.4 * (ext + stuck),
+    `${B} blobs, ${stuck.toFixed(0)} of ${(ext + stuck).toFixed(0)} mm3`);
+  let rOk = true;
+  for (let b = 0; b < B; b++) {
+    const R = s.blobPos[b * 4 + 3], want = Math.max(0.6, Math.cbrt((3 * perBlob[b]) / (4 * Math.PI * 0.55)));
+    if (Math.abs(R - want) > 0.02 * want + 0.05) rOk = false;
+  }
+  check('each blob is drawn as big as the plastic in it (55% packed tangle)', rOk);
+  // a blob comes off where the nozzle is when it happens: after the plastic in it was laid
+  let orderOk = true;
+  for (let i = 0; i < N; i++) if (s.blob[i] && s.blobPiece[s.blob[i] - 1] < i) { orderOk = false; break; }
+  check('blobs come off the nozzle after they were picked up', orderOk);
+  check('every strand has a heat value', s.heat && s.heat.length === N && s.heat.some((v) => v > 0));
+}
+
+// ---- cooling: soft seconds come from the fan and the filament ----
+{
+  const { MATERIALS, softSeconds } = await import('../js/materials.js');
+  const pla0 = softSeconds(MATERIALS.PLA, 0, 215), pla1 = softSeconds(MATERIALS.PLA, 1, 215);
+  check('PLA stays soft much longer with the part fan off', pla1 > 0.4 && pla1 < 2 && pla0 > 4 * pla1, `${pla1.toFixed(2)} s at 100% fan, ${pla0.toFixed(2)} s at 0%`);
+  check('hotter nozzle, softer strand', softSeconds(MATERIALS.PLA, 1, 240) > pla1);
 }
 
 // ---- service worker: every module is precached, or the app won't boot offline ----

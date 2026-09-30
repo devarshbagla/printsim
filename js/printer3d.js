@@ -28,6 +28,7 @@ import * as THREE from 'three';
 import { RoundedBoxGeometry } from '../vendor/RoundedBoxGeometry.js';
 
 const TUBE_LEN = 275; // Bowden PTFE, mm (Prusa part drawing)
+const TUBE_LIFT = 30; // mm: the flattest the tube's arc gets (PTFE kinks below ~25 mm bend radius)
 
 function mats() {
   return {
@@ -206,15 +207,109 @@ function mergeStatic(group) {
   }
 }
 
-// length of a cubic Bezier (sampled)
-function bezierLen(p0, p1, p2, p3, n = 32) {
-  const a = new THREE.Vector3(), b = new THREE.Vector3();
-  const at = (t, out) => out.set(0, 0, 0)
-    .addScaledVector(p0, (1 - t) ** 3).addScaledVector(p1, 3 * (1 - t) ** 2 * t)
-    .addScaledVector(p2, 3 * (1 - t) * t * t).addScaledVector(p3, t ** 3);
-  let len = 0; at(0, a);
-  for (let i = 1; i <= n; i++) { at(i / n, b); len += a.distanceTo(b); a.copy(b); }
-  return len;
+// A tube whose shape changes every frame (the Bowden tube, the filament off the
+// spool). One buffer, rewritten in place: no new geometry per frame, so no
+// garbage-collector hitches. Rings are spaced evenly by ARC LENGTH (a Bezier's
+// own parameter bunches them up on the tight bend and stretches them on the
+// straight bit) and oriented by parallel transport from a fixed reference, so
+// the tube never twists, pinches or flips as it moves.
+const DENSE = 96;
+class LiveTube {
+  constructor(segs, radial, radius, material) {
+    this.n = segs; this.m = radial; this.r = radius;
+    const V = (segs + 1) * (radial + 1);
+    this.pos = new Float32Array(V * 3);
+    this.nor = new Float32Array(V * 3);
+    const idx = [];
+    for (let i = 0; i < segs; i++) {
+      for (let j = 0; j < radial; j++) {
+        const a = i * (radial + 1) + j, b = a + radial + 1;
+        idx.push(a, b, a + 1, b, b + 1, a + 1);
+      }
+    }
+    const g = new THREE.BufferGeometry();
+    this.aPos = new THREE.BufferAttribute(this.pos, 3).setUsage(THREE.DynamicDrawUsage);
+    this.aNor = new THREE.BufferAttribute(this.nor, 3).setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('position', this.aPos);
+    g.setAttribute('normal', this.aNor);
+    g.setIndex(idx);
+    this.mesh = new THREE.Mesh(g, material);
+    this.mesh.frustumCulled = false;
+    this.mesh.userData.keep = true;
+    this.dense = new Float32Array((DENSE + 1) * 3);
+    this.cum = new Float32Array(DENSE + 1);
+    this.ctl = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+    this.pts = new Float32Array((segs + 1) * 3);
+    this.N = new THREE.Vector3(); this.T = new THREE.Vector3(); this.B = new THREE.Vector3();
+  }
+
+  // sample the cubic Bezier densely; returns its length
+  _sample(p0, p1, p2, p3) {
+    const d = this.dense, c = this.cum;
+    let len = 0;
+    for (let i = 0; i <= DENSE; i++) {
+      const t = i / DENSE, u = 1 - t;
+      const a = u * u * u, b = 3 * u * u * t, cc = 3 * u * t * t, e = t * t * t;
+      d[i * 3] = a * p0.x + b * p1.x + cc * p2.x + e * p3.x;
+      d[i * 3 + 1] = a * p0.y + b * p1.y + cc * p2.y + e * p3.y;
+      d[i * 3 + 2] = a * p0.z + b * p1.z + cc * p2.z + e * p3.z;
+      if (i) len += Math.hypot(d[i * 3] - d[i * 3 - 3], d[i * 3 + 1] - d[i * 3 - 2], d[i * 3 + 2] - d[i * 3 - 1]);
+      c[i] = len;
+    }
+    return len;
+  }
+
+  length(p0, p1, p2, p3) { return this._sample(p0, p1, p2, p3); }
+
+  /** reshape the tube along a cubic Bezier */
+  setBezier(p0, p1, p2, p3) {
+    const total = this._sample(p0, p1, p2, p3);
+    const d = this.dense, c = this.cum, n = this.n, m = this.m;
+    const P = this.pts, k0 = { k: 0 };
+    let o3 = 0;
+    const at = (s, out) => {
+      let k = k0.k;
+      while (k < DENSE - 1 && c[k + 1] < s) k++;
+      k0.k = k;
+      const f = c[k + 1] > c[k] ? (s - c[k]) / (c[k + 1] - c[k]) : 0;
+      out[o3] = d[k * 3] + (d[k * 3 + 3] - d[k * 3]) * f;
+      out[o3 + 1] = d[k * 3 + 1] + (d[k * 3 + 4] - d[k * 3 + 1]) * f;
+      out[o3 + 2] = d[k * 3 + 2] + (d[k * 3 + 5] - d[k * 3 + 2]) * f;
+    };
+    for (let i = 0; i <= n; i++) { o3 = i * 3; at((total * i) / n, P); }
+    // parallel transport: start from the reference "sideways" axis (world Z,
+    // made perpendicular to the first tangent) and carry it along the curve
+    const N = this.N, T = this.T, B = this.B;
+    const tangent = (i, out) => {
+      const a = Math.max(0, i - 1) * 3, b = Math.min(n, i + 1) * 3;
+      out.set(P[b] - P[a], P[b + 1] - P[a + 1], P[b + 2] - P[a + 2]);
+      if (out.lengthSq() < 1e-12) out.set(0, 1, 0);
+      return out.normalize();
+    };
+    tangent(0, T);
+    N.set(0, 0, 1).addScaledVector(T, -T.z);
+    if (N.lengthSq() < 1e-6) N.set(1, 0, 0).addScaledVector(T, -T.x);
+    N.normalize();
+    const pos = this.pos, nor = this.nor, R = this.r;
+    for (let i = 0; i <= n; i++) {
+      if (i) {
+        tangent(i, T);
+        N.addScaledVector(T, -N.dot(T));
+        if (N.lengthSq() < 1e-9) N.set(0, 0, 1).addScaledVector(T, -T.z);
+        N.normalize();
+      }
+      B.crossVectors(T, N);
+      for (let j = 0; j <= m; j++) {
+        const a = (j / m) * Math.PI * 2, ca = Math.cos(a), sa = Math.sin(a);
+        const nx = ca * N.x + sa * B.x, ny = ca * N.y + sa * B.y, nz = ca * N.z + sa * B.z;
+        const o = (i * (m + 1) + j) * 3;
+        nor[o] = nx; nor[o + 1] = ny; nor[o + 2] = nz;
+        pos[o] = P[i * 3] + nx * R; pos[o + 1] = P[i * 3 + 1] + ny * R; pos[o + 2] = P[i * 3 + 2] + nz * R;
+      }
+    }
+    this.aPos.needsUpdate = true;
+    this.aNor.needsUpdate = true;
+  }
 }
 
 // ---- the printer ---------------------------------------------------------
@@ -235,8 +330,8 @@ export class PrinterModel {
     for (const g of [this.root, this.bedCarriage, this.bed, this.gantry]) mergeStatic(g);
     this.head.userData.keep = false;
     mergeStatic(this.head);
-    this.tubeState = '';
-    this.filState = '';
+    this.tubeState = NaN;
+    this.filState = NaN;
   }
 
   _build() {
@@ -459,9 +554,9 @@ export class PrinterModel {
     this.glow.position.y = 1;
     H.add(this.glow);
 
-    // Bowden tube (rebuilt as the head moves; both ends ride on the gantry)
-    this.tube = new THREE.Mesh(new THREE.BufferGeometry(), m.tube);
-    this.tube.userData.keep = true;
+    // Bowden tube (reshaped in place as the head moves; both ends ride on the gantry)
+    this.tubeLive = new LiveTube(64, 12, 2, m.tube);
+    this.tube = this.tubeLive.mesh;
     this.gantry.add(this.tube);
   }
 
@@ -500,8 +595,8 @@ export class PrinterModel {
     this.spoolTop = new THREE.Vector3(colX - 30 + 14, cy + windR, -260);
     this.root.add(S);
     // the free strand from the spool to the extruder (rebuilt as the gantry moves)
-    this.fil = new THREE.Mesh(new THREE.BufferGeometry(), m.filament);
-    this.fil.userData.keep = true;
+    this.filLive = new LiveTube(32, 6, 0.9, m.filament);
+    this.fil = this.filLive.mesh;
     this.root.add(this.fil);
   }
 
@@ -517,35 +612,43 @@ export class PrinterModel {
     this.gantry.position.y = hy;
     this.bed.position.z = bedZ;
     this.glow.intensity = extruding ? 3 : 0;
-    // Bowden tube: fixed length between the head and the extruder, both on the
-    // gantry, so its shape only depends on X. It bulges up into a loop when the
-    // head is close to the extruder and pulls nearly straight when it's far.
-    const kx = Math.round(hx);
-    if (kx !== this.tubeState) {
-      this.tubeState = kx;
-      const p0 = this.headIn.clone(); p0.x += hx;
-      const p3 = this.extruderOut.clone();
-      const up = new THREE.Vector3(0, 1, 0);
-      const ctl = (k) => [p0, p0.clone().addScaledVector(up, k), p3.clone().addScaledVector(up, k), p3];
-      let lo = 2, hi = 400;
-      if (bezierLen(...ctl(lo)) < TUBE_LEN) {
-        for (let i = 0; i < 24; i++) { const mid = (lo + hi) / 2; if (bezierLen(...ctl(mid)) < TUBE_LEN) lo = mid; else hi = mid; }
+    // Bowden tube: a fixed length between the head and the extruder, both on the
+    // gantry, so its shape only depends on X. Both ends leave straight up (the
+    // push-fit fittings point up) and the tube arcs over: a big loop when the
+    // head is close to the extruder, a flatter arc when it's far. A PTFE tube
+    // can't bend sharper than ~25 mm without kinking, so the arc never flattens
+    // past a 30 mm lift (in the last ~30 mm of travel at the far left that makes
+    // it up to ~4% longer than 275 mm, instead of snapping into a straight line).
+    if (!(Math.abs(hx - this.tubeState) <= 0.02)) {
+      this.tubeState = hx;
+      const T = this.tubeLive, c = T.ctl;
+      const p0 = c[0].copy(this.headIn); p0.x += hx;
+      const p3 = c[3].copy(this.extruderOut);
+      const shape = (k) => { c[1].copy(p0); c[1].y += k; c[2].copy(p3); c[2].y += k; };
+      let lo = TUBE_LIFT, hi = 400;
+      shape(lo);
+      if (T.length(p0, c[1], c[2], p3) < TUBE_LEN) {
+        for (let i = 0; i < 22; i++) {
+          const mid = (lo + hi) / 2;
+          shape(mid);
+          if (T.length(p0, c[1], c[2], p3) < TUBE_LEN) lo = mid; else hi = mid;
+        }
       }
-      const [a, b, c, d] = ctl(lo);
-      const curve = new THREE.CubicBezierCurve3(a, b, c, d);
-      this.tube.geometry.dispose();
-      this.tube.geometry = new THREE.TubeGeometry(curve, 48, 2, 10, false);
+      shape(lo);
+      T.setBezier(p0, c[1], c[2], p3);
     }
     // the filament strand from the spool into the back of the extruder
-    const ky = Math.round(hy);
-    if (this.fil && ky !== this.filState) {
-      this.filState = ky;
-      const pin = this.extruderIn.clone(); pin.y += hy;
-      const top = this.spoolTop;
-      const mid = new THREE.Vector3((top.x + pin.x) / 2, Math.max(top.y, pin.y) + 18, (top.z + pin.z) / 2);
-      const curve = new THREE.QuadraticBezierCurve3(top, mid, pin);
-      this.fil.geometry.dispose();
-      this.fil.geometry = new THREE.TubeGeometry(curve, 24, 0.9, 6, false);
+    if (!(Math.abs(hy - this.filState) <= 0.02)) {
+      this.filState = hy;
+      const F = this.filLive, c = F.ctl;
+      const top = c[0].copy(this.spoolTop);
+      const pin = c[3].copy(this.extruderIn); pin.y += hy;
+      // a quadratic sag-free arc (the strand is under a little tension), as a cubic
+      const mid = F.mid || (F.mid = new THREE.Vector3());
+      mid.set((top.x + pin.x) / 2, Math.max(top.y, pin.y) + 18, (top.z + pin.z) / 2);
+      c[1].copy(top).lerp(mid, 2 / 3);
+      c[2].copy(pin).lerp(mid, 2 / 3);
+      F.setBezier(top, c[1], c[2], pin);
     }
   }
 

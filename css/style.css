@@ -580,3 +580,7 @@ dialog .actions { margin-top: 16px; }
 @media (orientation: landscape) and (max-height: 520px) {
   .landing { width: min(56vw, 480px); padding: 56px 56px 16px max(20px, env(safe-area-inset-left)); }
 }
+
+/* landing: still scrolls (wheel, trackpad, touch), without a scrollbar in the middle of the screen */
+.landing { scrollbar-width: none; -ms-overflow-style: none; }
+.landing::-webkit-scrollbar { display: none; width: 0; height: 0; }

@@ -24,13 +24,13 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 
 - No build step: plain ES modules, three.js r170 vendored in `vendor/`, import map in `index.html`. Keep it that way.
 - Everything runs in the browser. User files never leave the device.
-- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v14`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
+- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v15`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
 - File-derived text (file names, config values) goes in via `textContent`, never `innerHTML`.
-- The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops, 190x200 sheet, spool on a stand behind in the filament colour. Static parts merged per material (~44 draw calls).
+- The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops (reshaped in place each frame, never flatter than a 30 mm lift), 190x200 sheet, spool on a stand behind in the filament colour. Static parts merged per material (~44 draw calls).
 - Timelapse speeds are 10x / 50x / 200x / 1000x + layer by layer (2x to 8x was rejected as useless).
 - Ghost ("what's left to print") overlay: pref `ghost` (preview, default on) and `ghostRun` (live print, default **off**). The tip next to its button is laptop-only (min-width 900px, hover + fine pointer), shown max twice, gone once closed or the button is used. Never on phones.
 - Physics is a rule-based height-map check, not a rigid-body sim. Declined: PBD solver, two-hop perimeter bonding, invented flow-rate factor.
-- Live prints render at 15 fps (`view.maxFps`, full rate while dragging); previews run full rate.
+- Live prints render at 30 fps, evenly paced (`view.maxFps`, full rate while dragging), head drawn exactly; previews run full rate and the drawn head follows the real one on a critically damped spring (`view.setMotionSmoothing`, `motionTau` in app.js: 0.04 s at 10x to 0.12 s at 1000x).
 - Update `docs/VERIFICATION.md` whenever a number or assumption changes.
 
 ## Map
@@ -63,7 +63,8 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 - Warning box shows only when failedFraction >= 0.2% and failedSegments >= 20. Under 5% failing gets a milder message.
 - Parts that start in mid-air are counted separately (union-find over each layer's strands, merged up through layers).
 - Fallen plastic conserves volume: the pile rises by exactly what lands; a fallen strand keeps the w x h cross-section area; a strand tied to a hinge hangs no lower than its length allows.
-- A fall takes 0.7 s of **print** time, so faster playback falls faster.
+- A fall takes 0.7 s of **print** time for cold plastic, up to ~1.7 s for soft plastic, so faster playback falls faster. Heat = `softSeconds` (materials.js, Newton cooling by fan/temp/strand size) / 8 s, per piece as `segs.heat` -> `iHeat`: soft strands ooze down without bouncing, cold ones jut out, drop and curl hard; fresh plastic keeps a wet gloss for its soft time.
+- Nozzle blobs: loose runs can stick to the nozzle (chance by material `stick` x heat x length), ride with the head (`uNozzle` = drawn head), get wiped onto the part after 5-60 mm of held printing or drop past 120 mm3. `segs.blob` (1 + blob id per piece), `segs.blobPiece`/`blobPos` -> `uBlobs` texture (rest xyz + radius, time off). Stuck plastic is not debris where it was laid; its volume lands with the blob. Separate RNG (`randB`) so blobs never move other debris.
 - Strands render with their real cross-section (flat-topped stadium, w x h, half a layer under the nozzle); sub-pixel layers shade as the surface they form.
 
 ## Tests (run before and after every change)

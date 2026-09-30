@@ -162,6 +162,9 @@ def main():
                 page.click('#btn-pause'); resumed()
                 page.wait_for_function(f"document.getElementById('bar').style.width !== '{w0}'", timeout=20_000)
                 check('resume moves it again', width() != w0, f'{w0} -> {width()}')
+                # a live print draws the head exactly where it is, 30 fps, evenly paced
+                live = page.evaluate('({ fps: window.__printsim.view.maxFps, tau: window.__printsim.view.motionTau })')
+                check('live print: 30 fps, head drawn exactly (no smoothing lag)', live['fps'] == 30 and live['tau'] == 0, str(live))
             box = page.locator('#btn-cal').bounding_box()
             check(f'{tag} Remind me button is on screen', box and box['x'] >= 0 and box['x'] + box['width'] <= w and box['y'] + box['height'] <= h,
                   str({k: round(v) for k, v in (box or {}).items()}))
@@ -186,6 +189,8 @@ def main():
         ctx, page = new_page(browser, url, 1280, 780, errors)
         page.wait_for_function('window.__printsim.view.insets.left > 0')
         check('laptop landing: text column left, printer right', page.evaluate("document.getElementById('landing').getBoundingClientRect().right") < 1280 * 0.5)
+        sb = page.evaluate("(() => { const l = document.getElementById('landing'); return { w: getComputedStyle(l).scrollbarWidth, gutter: l.offsetWidth - l.clientWidth }; })()")
+        check('laptop landing: no scrollbar in the middle of the screen', sb['w'] == 'none' and sb['gutter'] == 0, str(sb))
         load_bytes(page, 'vase-with-swap.gcode', with_filament_change())
         start(page)
         page.click('#btn-cal')
@@ -297,6 +302,16 @@ def main():
         page.click('[data-speed="1000"]'); page.click('#btn-play'); page.wait_for_timeout(600)
         f1000 = fall(); page.click('#btn-play')
         check('falling filament speeds up with the preview (same print-time fall at 10x and 1000x)', f10 == f1000 and 0.3 < f10 < 2, f'{f10} vs {f1000} s')
+        tau = page.evaluate('window.__printsim.view.motionTau')
+        check('sped-up head glides instead of teleporting', 0.05 < tau <= 0.12, f'{tau} s')
+        blobs = page.evaluate('''() => { const v = window.__printsim.view, d = v.blobTex.image.data, n = v.blobPiece ? v.blobPiece.length : 0;
+          let timed = 0; for (let b = 0; b < n; b++) if (d[b * 8 + 4] < 1e8) timed++; return { n, timed }; }''')
+        check('nozzle blobs reach the renderer with their times', blobs['n'] > 0 and blobs['timed'] == blobs['n'], str(blobs))
+        tube = page.evaluate('''() => { const pr = window.__printsim.view.printer, id = pr.tube.geometry.uuid, out = [];
+          for (const hx of [-90, -30, 40, 85]) { pr.setPose(hx, 30, 0, false); const P = pr.tubeLive.pts; let top = -1e9;
+            for (let i = 1; i < P.length; i += 3) top = Math.max(top, P[i]); out.push(top - Math.max(P[1], P[P.length - 2])); }
+          return { same: pr.tube.geometry.uuid === id, lift: Math.min(...out) }; }''')
+        check('Bowden tube reshapes in place and always arcs (never a straight line)', tube['same'] and tube['lift'] > 5, str(tube))
         page.fill('#scrub', '1000'); page.dispatch_event('#scrub', 'input')
         warn = page.inner_text('#support-warn')
         check('warning says when it goes wrong', 'goes wrong about' in warn and 'layer 61' in warn, warn[:120])
