@@ -1,0 +1,101 @@
+# printsim: project memory
+
+Phone-first web app that simulates a Prusa 3D print live from its `.bgcode` / `.gcode`.
+The user taps Start when the real printer starts; a 3D printer on screen prints the part
+in real time with % done, time left and ETA. Built for the Prusa MINI / MINI+ printers at
+Brandeis, which are **not networked**, so this is a timed simulation with manual resync
+(type the % from the printer screen), never a live feed.
+
+- Owner: Devarsh Bagla. Repo `devarshbagla/printsim` (public, MIT). Live: https://devarshbagla.github.io/printsim/
+- Deploy = push to `main` (GitHub Pages, main / root). Live in about a minute.
+- Full handoff doc (history, decisions, baselines): https://claude.ai/code/artifact/108e1277-5aa0-43a5-bc47-4df9476711e1
+- Deeper references in the repo: `README.md`, `docs/VERIFICATION.md` (every number + its source), `test/README.md`.
+- CI (`.github/workflows/tests.yml`) runs on every push to `main`: a Node job (`test/ci-check.mjs` gate + physics geometry, libbgcode pinned to `d4da907`) and a browser job (`test/e2e/e2e.py`, Playwright). Check it's green after pushing.
+
+## Working with Devarsh Bagla
+
+- Blunt, frank, Gen-Z tone. Call him out when he's wrong; no yes-man answers.
+- **No em dashes anywhere**: code comments, docs, UI copy, commit messages.
+- He often sends several asks at once, from his phone. Do them all, then report plainly what was done and what was skipped and why.
+- When he brings a review from another agent (Cursor/Grok etc.), verify each claim with a test and implement the valid parts yourself. Don't have two agents editing the same files.
+- "Doesn't need to be accurate to the second." "Forget about old devices." Accuracy should still trace to Prusa's own firmware/slicer numbers.
+
+## Hard rules
+
+- No build step: plain ES modules, three.js r170 vendored in `vendor/`, import map in `index.html`. Keep it that way.
+- Everything runs in the browser. User files never leave the device.
+- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v12`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
+- File-derived text (file names, config values) goes in via `textContent`, never `innerHTML`.
+- The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops, 190x200 sheet, spool on a stand behind in the filament colour. Static parts merged per material (~44 draw calls).
+- Timelapse speeds are 10x / 50x / 200x / 1000x + layer by layer (2x to 8x was rejected as useless).
+- Ghost ("what's left to print") overlay: pref `ghost` (preview, default on) and `ghostRun` (live print, default **off**). The tip next to its button is laptop-only (min-width 900px, hover + fine pointer), shown max twice, gone once closed or the button is used. Never on phones.
+- Physics is a rule-based height-map check, not a rigid-body sim. Declined: PBD solver, two-hop perimeter bonding, invented flow-rate factor.
+- Live prints render at 15 fps (`view.maxFps`, full rate while dragging); previews run full rate.
+- Update `docs/VERIFICATION.md` whenever a number or assumption changes.
+
+## Map
+
+| File | Job |
+| --- | --- |
+| `js/parser.worker.js` | Worker: decode, parse, detect material, physics, post transferable buffers |
+| `js/bgcode.js` | Prusa .bgcode decoder (Heatshrink, MeatPack, Deflate); byte-identical to libbgcode |
+| `js/gcode.js` | Byte-level parser + Marlin/Buddy classic-jerk planner replica; `Ev` and `Feature` enums |
+| `js/printers.js` | MINI + generic profiles, hardware caps, heater model, exact UBL probe replay (4x4 = 16 points) |
+| `js/timeline.js` | Per-move times anchored to `M73 P` (stealth `Q`), warm-up/homing/probing prelude, `factor = calibration * 100 / speedPct` |
+| `js/materials.js` | Filament limits per material, fan normalised to each material's own Prusa default fan; `limitsFor(mat, fan01, temp, cool)` |
+| `js/physics.js` | Support check (`analyzeSupport`), `splitSegments` for falling animation, `simulatePhysics` |
+| `js/renderer.js` | `PrintView`: one instanced strand mesh, `uHead` progress uniform, ghost pass, fall shader, camera fit |
+| `js/printer3d.js` | `PrinterModel`: bed-slinger (head X, gantry Z, bed Y), Bowden tube, canvas screen |
+| `js/app.js` | Modes empty/setup/run/done, preview player, run clock (timestamp based), resync, calibration, persistence, ghost tip. Debug: `window.__printsim.skip(sec)` |
+| `js/store.js` | IndexedDB (file + session) and localStorage (prefs, calibration, `printsim.ghostHint`) |
+| `js/report.js` | Spaghetti report: when it fails (time + layer + %), grams at stake (net E from `moves.e`, matches PrusaSlicer within 0.4%), why no supports (off, or on but paint-only) |
+| `js/ics.js` | "Remind me": `.ics` with alarms for the finish and filament swaps + Google Calendar link; iOS gets a `data:text/calendar` URL; fresh UIDs per export |
+| `js/recorder.js` | "Save as video": ~12 s timelapse via MediaRecorder (MP4 where possible, else WebM), copied from WebGL in `renderer.onRendered`; Web Share or save |
+| `css/style.css` | Bottom sheet on phones; side card at >=900px and on landscape phones (max-height 520px) |
+
+## Physics constants that matter
+
+- `CELL 0.15`, `SAMPLE 0.4`, `SAG_MIN 0.06`, `LINK_TOL 0.05`, `CATCH 0.8` (mm).
+- Sample states: 1 vertical, 2 side-bonded (one hop), 3 hinge, 4 stub, 5 caught, 0 unsupported.
+- Catch rule: a would-fall sample with held plastic or the bed within 0.8 mm below sags onto it and holds (print-in-place gaps). Fixed the YAFIC infinity cube false alarm (7.6% to 0.00%).
+- Hinges/stubs are stamped at `z - 1.5h - CATCH` so overhangs can't creep outward layer by layer. Don't undo this.
+- Warning box shows only when failedFraction >= 0.2% and failedSegments >= 20. Under 5% failing gets a milder message.
+- Parts that start in mid-air are counted separately (union-find over each layer's strands, merged up through layers).
+- Fallen plastic conserves volume: the pile rises by exactly what lands; a fallen strand keeps the w x h cross-section area; a strand tied to a hinge hangs no lower than its length allows.
+- A fall takes 0.7 s of **print** time, so faster playback falls faster.
+- Strands render with their real cross-section (flat-topped stadium, w x h, half a layer under the nozzle); sub-pixel layers shade as the surface they form.
+
+## Tests (run before and after every change)
+
+```bash
+git clone --depth 1 https://github.com/prusa3d/libbgcode <somewhere>/libbgcode
+D=<somewhere>/libbgcode/tests/data
+node test/decode-test.mjs $D
+node test/parse-test.mjs $D
+node test/timeline-test.mjs $D
+node test/physics-test.mjs samples/*.gcode test/bridge.gcode $D/*.bgcode
+MATS=PETG,ABS node test/physics-test.mjs test/bridge.gcode samples/mushroom-no-supports.gcode
+node test/physics-geometry-test.mjs
+node test/ci-check.mjs $D                 # the CI gate: asserts the invariants, exits nonzero
+python test/e2e/e2e.py --shots /tmp/shots  # Playwright, phone + laptop, a few minutes
+```
+
+Expected: decode identical for `mini_cube_b`; motion estimate within 0.5% of PrusaSlicer;
+every real print 0% fails; mushroom PLA ~52.9% from layer 61; bridge PLA 0% / PETG ~11% /
+ABS ~17%; geometry test "all checks passed". Devarsh's real test files (laptop stand, two
+Cessna kits, YAFIC cube on his Google Drive) are not in the repo; all were 0%. A later one, a
+19h17m melting Switch stand (1.39M strands), correctly flags 8 parts starting in mid-air.
+
+## Gotchas
+
+- Serve over HTTP (`python3 -m http.server 8765`); the import map fails on `file://`.
+- Headless Chromium (SwiftShader) runs ~1 fps: use DPR 1, small viewports, long timeouts. CSS transitions barely advance there, so `opacity: 0` on a visible element is a test artifact.
+- In Node, load .bgcode as `decodeBgcode(bytes)` then `parseGcode(d.gcode)` and merge `d.metadata.slicer` + `d.metadata.printer` into `parsed.meta.config`.
+- Debugging a physics flag: break failing samples down by layer and feature, then plot slices and a vertical cross-section (matplotlib). Found the YAFIC hinge gap that way.
+- After a push, poll `https://devarshbagla.github.io/printsim/sw.js` for the new cache name to confirm deploy.
+
+## Open items
+
+- Waiting on Devarsh's real-device feedback: phone layout, landscape side card, landing (printer now has its own band/column, never behind text), ghost tip on a laptop, calendar reminders on iOS, video export, real print vs sim timing (tap "Printer finished" to calibrate).
+- YAFIC: ~7 mm of tiny fillers between hinge knuckles still animate falling (cosmetic, under threshold).
+- Ideas, not requested: more printers (MK4/MK4S, Core One, Bambu), `.gcode.3mf`, laptop-to-phone handoff.
