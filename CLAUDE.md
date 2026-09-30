@@ -24,7 +24,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 
 - No build step: plain ES modules, three.js r170 vendored in `vendor/`, import map in `index.html`. Keep it that way.
 - Everything runs in the browser. User files never leave the device.
-- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v13`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
+- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v14`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
 - File-derived text (file names, config values) goes in via `textContent`, never `innerHTML`.
 - The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops, 190x200 sheet, spool on a stand behind in the filament colour. Static parts merged per material (~44 draw calls).
 - Timelapse speeds are 10x / 50x / 200x / 1000x + layer by layer (2x to 8x was rejected as useless).

@@ -891,6 +891,12 @@ function startRecording() {
   setPlaying(false);
   preview.t = tl.startupEnd;
   $('scrub').value = 0;
+  // the video's first frame (what share sheets show as its thumbnail) must be a
+  // real one: render now and copy it in before the recorder starts, otherwise it
+  // can grab the blank canvas first
+  renderPreview();
+  view.renderer.render(view.scene, view.camera);
+  view.onRendered();
   try {
     rec.r.start();
   } catch (e) {
