@@ -24,7 +24,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 
 - No build step: plain ES modules, three.js r170 vendored in `vendor/`, import map in `index.html`. Keep it that way.
 - Everything runs in the browser. User files never leave the device.
-- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v12`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
+- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v13`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
 - File-derived text (file names, config values) goes in via `textContent`, never `innerHTML`.
 - The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops, 190x200 sheet, spool on a stand behind in the filament colour. Static parts merged per material (~44 draw calls).
 - Timelapse speeds are 10x / 50x / 200x / 1000x + layer by layer (2x to 8x was rejected as useless).
@@ -37,7 +37,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 
 | File | Job |
 | --- | --- |
-| `js/parser.worker.js` | Worker: decode, parse, detect material, physics, post transferable buffers |
+| `js/parser.worker.js` | Worker: decode, parse, detect material, physics, post transferable buffers. Also re-runs physics for a filament switch (`type: 'physics'`) so the page never freezes; the first parse takes the remembered filament |
 | `js/bgcode.js` | Prusa .bgcode decoder (Heatshrink, MeatPack, Deflate); byte-identical to libbgcode |
 | `js/gcode.js` | Byte-level parser + Marlin/Buddy classic-jerk planner replica; `Ev` and `Feature` enums |
 | `js/printers.js` | MINI + generic profiles, hardware caps, heater model, exact UBL probe replay (4x4 = 16 points) |
@@ -46,7 +46,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 | `js/physics.js` | Support check (`analyzeSupport`), `splitSegments` for falling animation, `simulatePhysics` |
 | `js/renderer.js` | `PrintView`: one instanced strand mesh, `uHead` progress uniform, ghost pass, fall shader, camera fit |
 | `js/printer3d.js` | `PrinterModel`: bed-slinger (head X, gantry Z, bed Y), Bowden tube, canvas screen |
-| `js/app.js` | Modes empty/setup/run/done, preview player, run clock (timestamp based), resync, calibration, persistence, ghost tip. Debug: `window.__printsim.skip(sec)` |
+| `js/app.js` | Modes empty/setup/run/done, preview player, run clock (timestamp based), resync, calibration, persistence, ghost tip. Debug: `window.__printsim` (`skip(sec)`, `view`, `support`, `recSeconds`) |
 | `js/store.js` | IndexedDB (file + session) and localStorage (prefs, calibration, `printsim.ghostHint`) |
 | `js/report.js` | Spaghetti report: when it fails (time + layer + %), grams at stake (net E from `moves.e`, matches PrusaSlicer within 0.4%), why no supports (off, or on but paint-only) |
 | `js/ics.js` | "Remind me": `.ics` with alarms for the finish and filament swaps + Google Calendar link; iOS gets a `data:text/calendar` URL; fresh UIDs per export |
@@ -58,6 +58,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 - `CELL 0.15`, `SAMPLE 0.4`, `SAG_MIN 0.06`, `LINK_TOL 0.05`, `CATCH 0.8` (mm).
 - Sample states: 1 vertical, 2 side-bonded (one hop), 3 hinge, 4 stub, 5 caught, 0 unsupported.
 - Catch rule: a would-fall sample with held plastic or the bed within 0.8 mm below sags onto it and holds (print-in-place gaps). Fixed the YAFIC infinity cube false alarm (7.6% to 0.00%).
+- Short spans: tied at both ends and <= 2.5 cantilever lengths holds whatever its shape (re-checked after the catch rule); floating strands <= 3 mm (`SHORT`) are decided at the end of their layer (held if they touch same-layer held plastic). YAFIC now has zero falling plastic.
 - Hinges/stubs are stamped at `z - 1.5h - CATCH` so overhangs can't creep outward layer by layer. Don't undo this.
 - Warning box shows only when failedFraction >= 0.2% and failedSegments >= 20. Under 5% failing gets a milder message.
 - Parts that start in mid-air are counted separately (union-find over each layer's strands, merged up through layers).
@@ -82,7 +83,7 @@ python test/e2e/e2e.py --shots /tmp/shots  # Playwright, phone + laptop, a few m
 
 Expected: decode identical for `mini_cube_b`; motion estimate within 0.5% of PrusaSlicer;
 every real print 0% fails; mushroom PLA ~52.9% from layer 61; bridge PLA 0% / PETG ~11% /
-ABS ~17%; geometry test "all checks passed". Devarsh's real test files (laptop stand, two
+ABS ~17%; geometry test "all checks passed". (Mushroom PLA is 52.27% since the short-span rule.) Devarsh's real test files (laptop stand, two
 Cessna kits, YAFIC cube on his Google Drive) are not in the repo; all were 0%. A later one, a
 19h17m melting Switch stand (1.39M strands), correctly flags 8 parts starting in mid-air.
 
@@ -97,5 +98,4 @@ Cessna kits, YAFIC cube on his Google Drive) are not in the repo; all were 0%. A
 ## Open items
 
 - Waiting on Devarsh's real-device feedback: phone layout, landscape side card, landing (printer now has its own band/column, never behind text), ghost tip on a laptop, calendar reminders on iOS, video export, real print vs sim timing (tap "Printer finished" to calibrate).
-- YAFIC: ~7 mm of tiny fillers between hinge knuckles still animate falling (cosmetic, under threshold).
 - Ideas, not requested: more printers (MK4/MK4S, Core One, Bambu), `.gcode.3mf`, laptop-to-phone handoff.

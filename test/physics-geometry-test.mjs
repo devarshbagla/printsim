@@ -134,6 +134,24 @@ const far = [[60, 60, 70, 60, 5]]; // keeps an otherwise empty layer from being 
   check('mid-air: found on the layer it starts', sm.islandFirstLayer === Array.from(layers.z).findIndex((z) => z > 4.95), `layer ${sm.islandFirstLayer + 1}`);
   check('mid-air: the shelf off the pillar is not counted', sm.islandList.every((i) => Math.hypot(i.x - 20, i.y - 5) < 3));
 }
+// ---------------------------------------------------------------- 5b. where two parts join
+{
+  // two 4x4 mm pads with a 2 mm gap (like two hinge knuckles), then a layer that
+  // joins them: its outline dips 1.2 mm into the gap as a short V, and a tiny
+  // filler in the gap is printed BEFORE the V it touches (YAFIC infinity cube)
+  const padAt = (x0) => { const out = []; for (let y = 2.2; y < 6; y += 0.45) out.push([x0, y, x0 + 4, y, 5]); return out; };
+  const L = [];
+  for (let i = 1; i <= 10; i++) L.push([+(i * 0.2).toFixed(2), [...padAt(0), ...padAt(6)]]);
+  const tri = [[4.75, 1.3, 5.25, 1.3, 3], [5.25, 1.3, 5.0, 1.7, 3], [5.0, 1.7, 4.75, 1.3, 3]];
+  const V = [[3.6, 3, 4.4, 1.0, 3], [4.4, 1.0, 5.6, 1.0, 3], [5.6, 1.0, 6.4, 3, 3]];
+  L.push([2.1, [...tri, ...V, ...padAt(0), ...padAt(6)]]);
+  const { S, layers } = build(L);
+  const res = analyzeSupport(S, layers, { material: 'PLA', temp: 215 });
+  const top = layerSamples(S, layers, res, 10);
+  check('join: a short V between two parts holds (it just sags)', top.every((q) => q.drop === 0), `${top.filter((q) => q.drop > 0).length} samples fall`);
+  check('join: nothing counted as a floating part', res.summary.islands === 0, `${res.summary.islands}`);
+}
+
 // ---------------------------------------------------------------- 6. fallen plastic keeps its volume
 {
   // 10 solid layers (0.2 mm, 10 x 10 mm) printed 5 mm up with nothing under them all

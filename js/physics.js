@@ -34,6 +34,8 @@ const LINK_TOL = 0.05; // mm; consecutive moves closer than this form one strand
 // lands on it instead of falling. Estimate: print-in-place gaps of 0.3-0.5 mm
 // and support gaps of 0.1-0.3 mm print fine; ~1 mm starts getting stringy.
 const CATCH = 0.8;
+// floating strands at most this long (mm) are judged at the end of their layer
+const SHORT = 3;
 
 const featureOf = (m) => Math.floor(m / 4 + 1e-3);
 const widthOf = (m) => m - featureOf(m) * 4;
@@ -85,6 +87,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
   const top = new Float32Array(W * H).fill(-1);   // held plastic (supports things)
   const debris = new Float32Array(W * H);          // fallen plastic (only for landing)
   const side = new Uint32Array(W * H);             // same-layer supported cells, tagged by layer
+  const heldL = new Uint32Array(W * H);            // any same-layer plastic that stayed put, tagged by layer
   // 1 mm grid linking strands of the same layer that touch (for floating-part detection)
   const WC = Math.max(1, Math.ceil((maxX - minX))), HC = Math.max(1, Math.ceil((maxY - minY)));
   const cellL = new Uint32Array(WC * HC), cellOwner = new Int32Array(WC * HC);
@@ -186,7 +189,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
     const cool = layerSec && layerSec[L] > 0 ? Math.max(0.5, Math.min(1, layerSec[L] / 8)) : 1;
     let affected = false;
     // union-find over this layer's strands: which blobs have anything that held
-    const par = [], held = [], cands = [];
+    const par = [], held = [], cands = [], deferred = [];
     const find = (a) => { while (par[a] !== a) { par[a] = par[par[a]]; a = par[a]; } return a; };
     const union = (a, b) => { a = find(a); b = find(b); if (a !== b) { par[b] = a; held[a] = held[a] || held[b]; } };
 
@@ -259,6 +262,10 @@ export function analyzeSupport(segs, layers, opts = {}) {
             if (!ok && startAnch && endAnch && runLen <= bridgeMax) {
               ok = bridged = straightSpan(j, r, off, n, runLen, allSparse);
             }
+            // a short span tied down at both ends holds whatever its shape (a
+            // little U or V where two parts join): it just sags. Long U-turns
+            // still have to pass the straightness test above.
+            if (!ok && startAnch && endAnch && runLen <= 2.5 * cant) ok = bridged = true;
             if (ok && !bridged && !(startAnch && endAnch)) {
               // a short stub sticking out: it stays, but droops and can't hold up the next layer
               for (let k = j; k < r; k++) sOk[(k + off) % n] = 4;
@@ -309,6 +316,29 @@ export function analyzeSupport(segs, layers, opts = {}) {
           summary.caught += sLen[j];
         }
       }
+      // --- a second look after catching: a stretch that was going to fall but now
+      // has held plastic on both sides (or one side, if short) is just a short span
+      if (!onBed) {
+        let j = 0;
+        while (j < n) {
+          if (!sFall[j]) { j++; continue; }
+          let r = j, runLen = 0, cant = Infinity, sag = 0;
+          while (r < n && sFall[r]) { const lm = lim(sSeg[r], cool); cant = Math.min(cant, lm.cantilever); sag = Math.max(sag, lm.sag); runLen += sLen[r]; r++; }
+          const a0 = j > 0, a1 = r < n;
+          if ((a0 && a1 && runLen <= 2.5 * cant) || ((a0 || a1) && runLen <= cant)) {
+            const maxSag = Math.min(4, sag * runLen * runLen / 10);
+            let acc = 0;
+            for (let k = j; k < r; k++) {
+              sFall[k] = 0;
+              sOk[k] = a0 && a1 ? 0 : 4;
+              const u = (acc + sLen[k] / 2) / runLen; acc += sLen[k];
+              sampleSag[sIdx[k]] = a0 && a1 ? maxSag * 4 * u * (1 - u) : 0;
+            }
+          }
+          j = r;
+        }
+        if (floating) for (let k = 0; k < n; k++) if (!sFall[k]) { floating = false; break; }
+      }
       // --- connectivity: link this strand to the ones of this layer it touches
       if (!onBed) {
         const sid = par.length;
@@ -323,6 +353,14 @@ export function analyzeSupport(segs, layers, opts = {}) {
         if (floating) {
           let cx_ = 0, cy_ = 0, len = 0;
           for (let j = 0; j < n; j++) { cx_ += sX[j]; cy_ += sY[j]; len += sLen[j]; }
+          if (len <= SHORT) {
+            // a short bit with nothing under it (a filler between two parts, a
+            // closing line) may be printed just BEFORE the plastic it touches:
+            // decide at the end of the layer, when all its neighbours exist
+            deferred.push({ sid, x: cx_ / n, y: cy_ / n, len, n, sx: sX.slice(0, n), sy: sY.slice(0, n), sl: sLen.slice(0, n), si: sIdx.slice(0, n), ss: sSeg.slice(0, n) });
+            p = q;
+            continue;
+          }
           cands.push({ sid, x: cx_ / n, y: cy_ / n, len });
         }
       }
@@ -341,6 +379,7 @@ export function analyzeSupport(segs, layers, opts = {}) {
           // could creep out ~2 mm per layer
           const zz = (sOk[j] === 3 || sOk[j] === 4) ? z - h * 1.5 - CATCH : sOk[j] === 5 ? z : z - sampleSag[sIdx[j]];
           stampDisk(top, sX[j], sY[j], zz, w * 0.5);
+          heldL[cy(sY[j]) * W + cx(sX[j])] = L + 1;
         } else {
           // lands on whatever is under it as a round string of the same volume
           // (its centre one radius up, a little loft for the tangle)
@@ -365,6 +404,36 @@ export function analyzeSupport(segs, layers, opts = {}) {
         for (let j = 0; j < n; j++) if (sFall[j] && sSeg[j] !== lastSeg) { lastSeg = sSeg[j]; summary.failedSegments++; }
       }
       p = q;
+    }
+    // short floating bits: fused to plastic of this layer that held -> held;
+    // otherwise they fall like any other strand
+    for (const d of deferred) {
+      let touching = false;
+      for (let j = 0; j < d.n && !touching; j++) {
+        const w = widthOf(meta[d.ss[j]]);
+        touching = within(d.sx[j], d.sy[j], w + 0.05, (c) => heldL[c] === L + 1);
+      }
+      if (touching) {
+        held[find(d.sid)] = true;
+        for (let j = 0; j < d.n; j++) {
+          stampDisk(top, d.sx[j], d.sy[j], z, widthOf(meta[d.ss[j]]) * 0.5);
+          heldL[cy(d.sy[j]) * W + cx(d.sx[j])] = L + 1;
+        }
+        summary.caught += d.len;
+        continue;
+      }
+      let lastSeg = -1;
+      for (let j = 0; j < d.n; j++) {
+        const w = widthOf(meta[d.ss[j]]);
+        const g = groundAt(d.sx[j], d.sy[j]);
+        const rest = g + Math.sqrt((w * h) / Math.PI) * (1 + 0.6 * rand());
+        sampleDrop[d.si[j]] = Math.max(0.02, z - h * 0.5 - rest);
+        summary.failedLength += d.sl[j];
+        if (d.ss[j] !== lastSeg) { lastSeg = d.ss[j]; summary.failedSegments++; }
+      }
+      for (let j = 0; j < d.n; j++) { const w = widthOf(meta[d.ss[j]]); addDebris(d.sx[j], d.sy[j], w * h * d.sl[j], w); }
+      affected = true;
+      cands.push({ sid: d.sid, x: d.x, y: d.y, len: d.len });
     }
     // floating strands whose whole blob has nothing that held: part of something
     // being printed in mid-air

@@ -3,7 +3,6 @@ import { buildTimeline, stateAt, timeForPercent } from './timeline.js';
 import { FeatureNames, Feature } from './gcode.js';
 import { PRINTERS, AMBIENT, guessPrinter } from './printers.js';
 import { MATERIALS, surfaceFor } from './materials.js';
-import { simulatePhysics } from './physics.js';
 import { idbGet, idbSet, idbDel, lsGet, lsSet, getCalibration, addCalibration } from './store.js';
 import { planEvents, buildIcs, googleCalendarUrl } from './ics.js';
 import { spaghettiReport, fmtGrams } from './report.js';
@@ -102,7 +101,12 @@ async function requestPersistence() {
 
 // ---------------------------------------------------------------- parsing
 let worker = null;
-function parseBytes(bytes) {
+function parseBytes(bytes, material) {
+  return workerCall({ bytes: bytes.slice(0), material }, true);
+}
+
+// one request to the worker; parse requests report progress into the loading overlay
+function workerCall(msg, progress = false) {
   if (!worker) worker = new Worker(new URL('./parser.worker.js', import.meta.url), { type: 'module' });
   return new Promise((resolve, reject) => {
     const id = Math.random();
@@ -110,6 +114,7 @@ function parseBytes(bytes) {
       const d = ev.data;
       if (d.id !== id) return;
       if (d.type === 'progress') {
+        if (!progress) return;
         $('loading-stage').textContent = d.stage;
         $('loading-bar').style.width = `${Math.round(d.value * 100)}%`;
       } else {
@@ -120,8 +125,8 @@ function parseBytes(bytes) {
     };
     worker.addEventListener('message', onMsg);
     worker.addEventListener('error', (e) => reject(new Error(e.message || 'Parser crashed')), { once: true });
-    // keep our own copy (it gets saved to IndexedDB), send the worker a clone
-    worker.postMessage({ id, bytes: bytes.slice(0) });
+    // (a parse gets a copy of the bytes: ours are kept for IndexedDB)
+    worker.postMessage({ ...msg, id });
   });
 }
 
@@ -130,7 +135,7 @@ async function openFile(name, bytes, restore = null) {
   $('loading-stage').textContent = 'Reading file';
   $('loading-bar').style.width = '0%';
   try {
-    const result = await parseBytes(bytes);
+    const result = await parseBytes(bytes, restore && restore.setup ? restore.setup.material : undefined);
     if (!result.segs.move.length) throw new Error("Couldn't find any extrusion moves in this file.");
     parsed = result;
     file = { name, bytes };
@@ -159,8 +164,8 @@ function onParsed(restore) {
     setup.nozzle = AMBIENT;
     setup.bed = AMBIENT;
   }
-  if (!restore || !restore.setup || !MATERIALS[setup.material]) setup.material = parsed.material || 'PLA';
-  if (setup.material !== parsed.material) simulatePhysics(parsed, setup.material, parsed.nozzleTemp);
+  // the worker already ran the support check for the remembered filament
+  setup.material = MATERIALS[parsed.activeMaterial] ? parsed.activeMaterial : (parsed.material || 'PLA');
   parsed.activeMaterial = setup.material;
   view.setCurl(MATERIALS[setup.material].curl);
   view.setSurface(surfaceFor(setup.material, cfg));
@@ -294,9 +299,37 @@ function updateMaterialNote() {
   $('material-note').textContent = m.note + fanTxt + sag;
 }
 
-function applyMaterial(key) {
+// Re-run the support check for another filament in the worker (seconds on big
+// prints). The overlay only shows if it takes long enough to notice.
+let physicsToken = 0;
+async function applyMaterial(key) {
   setup.material = key;
-  simulatePhysics(parsed, key, parsed.nozzleTemp);
+  saveSession();
+  const token = ++physicsToken;
+  const overlay = setTimeout(() => {
+    if (token !== physicsToken) return;
+    $('loading-stage').textContent = `Re-checking overhangs for ${MATERIALS[key].name}`;
+    $('loading-bar').style.width = '100%';
+    show('loading', true);
+  }, 150);
+  let r;
+  try {
+    r = await workerCall({
+      type: 'physics', rawSegs: parsed.rawSegs, rawLayerSeg: parsed.rawLayerSeg, layerZ: parsed.layers.z,
+      movesRaw: parsed.moves.raw, config: parsed.meta.config, material: key, temp: parsed.nozzleTemp,
+    });
+  } catch (err) {
+    console.error(err);
+    toast(`Couldn't re-check for ${MATERIALS[key].name}: ${err.message}`, 4200);
+    return;
+  } finally {
+    clearTimeout(overlay);
+    if (token === physicsToken) show('loading', false);
+  }
+  if (token !== physicsToken || !parsed || mode === 'empty') return; // superseded, or the file was closed
+  parsed.segs = r.segs;
+  parsed.layers.seg = r.layerSeg;
+  parsed.support = r.support;
   parsed.activeMaterial = key;
   view.setCurl(MATERIALS[key].curl);
   view.setSurface(surfaceFor(key, parsed.meta.config));
@@ -1210,6 +1243,7 @@ window.__printsim = {
   get run() { return run; },
   get recording() { return !!rec; },
   get view() { return view; },
+  get support() { return parsed && { ...parsed.support, material: parsed.activeMaterial }; },
 };
 
 init();

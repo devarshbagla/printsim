@@ -3,7 +3,7 @@
 import { isBgcode, decodeBgcode } from './bgcode.js';
 import { parseGcode, parseDuration } from './gcode.js';
 import { simulatePhysics } from './physics.js';
-import { detectMaterial, nozzleTemp } from './materials.js';
+import { detectMaterial, nozzleTemp, MATERIALS } from './materials.js';
 
 function buffersOf(obj, out = new Set()) {
   if (!obj || typeof obj !== 'object') return out;
@@ -13,7 +13,8 @@ function buffersOf(obj, out = new Set()) {
 }
 
 self.onmessage = async (ev) => {
-  const { id, bytes } = ev.data;
+  if (ev.data.type === 'physics') return rerunPhysics(ev.data);
+  const { id, bytes, material } = ev.data;
   try {
     const src = new Uint8Array(bytes);
     let gcode = src, bgMeta = null, bgThumbs = [];
@@ -41,7 +42,9 @@ self.onmessage = async (ev) => {
     result.rawLayerSeg = result.layers.seg.slice();
     result.material = detectMaterial(result.meta.config);
     result.nozzleTemp = nozzleTemp(result.meta.config);
-    simulatePhysics(result, result.material, result.nozzleTemp);
+    // the filament the user picked last time (reopening the app), else the file's
+    result.activeMaterial = MATERIALS[material] ? material : result.material;
+    simulatePhysics(result, result.activeMaterial, result.nozzleTemp);
     result.binary = binary;
     result.gcodeBytes = gcode.length;
     self.postMessage({ id, type: 'done', result }, [...buffersOf(result)]);
@@ -49,3 +52,20 @@ self.onmessage = async (ev) => {
     self.postMessage({ id, type: 'error', message: err && err.message ? err.message : String(err) });
   }
 };
+
+// The support check again for another filament, off the main thread (it takes
+// seconds on a million-strand print). The page sends its untouched raw strands.
+function rerunPhysics(d) {
+  try {
+    const r = {
+      rawSegs: d.rawSegs, rawLayerSeg: d.rawLayerSeg,
+      layers: { z: d.layerZ, seg: d.rawLayerSeg.slice() },
+      moves: { raw: d.movesRaw }, meta: { config: d.config },
+    };
+    simulatePhysics(r, d.material, d.temp);
+    const result = { segs: r.segs, layerSeg: r.layers.seg, support: r.support };
+    self.postMessage({ id: d.id, type: 'done', result }, [...buffersOf({ segs: result.segs, layerSeg: result.layerSeg })]);
+  } catch (err) {
+    self.postMessage({ id: d.id, type: 'error', message: err && err.message ? err.message : String(err) });
+  }
+}

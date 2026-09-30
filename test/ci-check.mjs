@@ -121,6 +121,10 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
     drawn += L * Math.PI * r * r;
   }
   check('fallen plastic is drawn with the volume that was extruded', ext > 100 && Math.abs(drawn / ext - 1) < 0.1, `${(drawn / ext).toFixed(2)}x of ${ext.toFixed(0)} mm3`);
+  // the rule above must be the one the shader actually uses
+  const shader = readFileSync(`${here}js/renderer.js`, 'utf8').replace(/\s+/g, ' ');
+  check('renderer draws fallen strands with that same thickness rule',
+    shader.includes('sqrt(width * lh / 3.14159) * sqrt(clamp(L0 / max(L, 1e-4), 0.25, 1.0))'));
 }
 
 // ---- service worker: every module is precached, or the app won't boot offline ----
