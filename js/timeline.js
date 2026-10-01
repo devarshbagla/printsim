@@ -174,10 +174,20 @@ export function buildTimeline(parsed, printer, opts = {}) {
     pAnchors.push({ p: a.p, t: Math.max(tStart(a.move), a.p === 0 ? startupEnd : 0) });
   }
 
+  // Remaining-time anchors (M73 R, or S in stealth): the "time left" the printer
+  // shows. Whole minutes, so on long prints they're finer than the 1% steps.
+  const rAnchors = [];
+  let lr = Infinity;
+  for (const a of anchorsIn) {
+    if (isNaN(a.r) || a.r > lr) continue;
+    lr = a.r;
+    rAnchors.push({ r: a.r, t: Math.max(tStart(a.move), rAnchors.length ? 0 : startupEnd) });
+  }
+
   const phaseByMove = new Map(phases.map(p => [p.move, p.label]));
 
   return {
-    tEnd, dur, total: t, startupEnd, pauses, phases, phaseByMove, pAnchors,
+    tEnd, dur, total: t, startupEnd, pauses, phases, phaseByMove, pAnchors, rAnchors,
     slicerTotal, motionTotal: t - startupEnd, factor, stealth, speedPct,
     tStart,
   };
@@ -273,6 +283,27 @@ export function stateAt(parsed, tl, t) {
     t: tc, move: k, frac, head, segHead, layer, layerCount: parsed.layers.z.length,
     z: head[2], feature, percent, startup, phase, extruding: kind === 1,
   };
+}
+
+/**
+ * Sim time where the printer's screen first shows this much time left (minutes).
+ * The MINI scales the file's M73 R by the print speed %, so undo that first.
+ * Returns null if the file has no remaining-time marks.
+ */
+export function timeForRemaining(tl, minutes) {
+  const ra = tl.rAnchors;
+  if (!ra || ra.length < 2 || !(minutes >= 0)) return null;
+  const fileR = minutes * (tl.speedPct || 100) / 100;
+  if (fileR >= ra[0].r) return ra[0].t;
+  for (let i = 1; i < ra.length; i++) {
+    if (ra[i].r <= fileR) {
+      const a = ra[i - 1], b = ra[i];
+      // R drops in whole minutes: land where the screen first shows this value
+      const f = a.r > b.r ? (a.r - Math.max(fileR, b.r)) / (a.r - b.r) : 1;
+      return a.t + (b.t - a.t) * Math.min(1, Math.max(0, f));
+    }
+  }
+  return ra[ra.length - 1].t;
 }
 
 /** Sim time where the printer's display first shows >= percent. */

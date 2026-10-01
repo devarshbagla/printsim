@@ -165,6 +165,21 @@ def main():
                 # a live print draws the head exactly where it is, 30 fps, evenly paced
                 live = page.evaluate('({ fps: window.__printsim.view.maxFps, tau: window.__printsim.view.motionTau })')
                 check('live print: 30 fps, head drawn exactly (no smoothing lag)', live['fps'] == 30 and live['tau'] == 0, str(live))
+                # resync by the time left on the printer's screen (finer than 1% steps)
+                def resync(pct, h, m):
+                    page.click('#btn-resync'); page.wait_for_selector('#dlg-resync[open]')
+                    page.fill('#resync-val', pct); page.fill('#resync-h', h); page.fill('#resync-m', m)
+                    page.click('#dlg-resync button[value=ok]')
+                    page.wait_for_function("document.getElementById('toast').textContent.startsWith('Synced') || document.getElementById('toast').textContent.includes('match')")
+                    msg = page.inner_text('#toast')
+                    page.evaluate("document.getElementById('toast').textContent = ''")
+                    return msg
+                check('resync dialog offers time left (file has M73 R)', page.evaluate("!document.getElementById('resync-left-row').classList.contains('hidden')"))
+                msg = resync('', '0', '20')
+                page.wait_for_function("/^(19|20)m left/.test(document.getElementById('remain').textContent)", timeout=20_000)
+                check('resync by time left lands on it', msg == 'Synced to 20m left', msg)
+                msg = resync('10', '0', '20')
+                check('time left vs % mismatch: warns, uses %', "don't match" in msg and 'Went with 10%' in msg, msg)
             box = page.locator('#btn-cal').bounding_box()
             check(f'{tag} Remind me button is on screen', box and box['x'] >= 0 and box['x'] + box['width'] <= w and box['y'] + box['height'] <= h,
                   str({k: round(v) for k, v in (box or {}).items()}))

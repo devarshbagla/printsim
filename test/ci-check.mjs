@@ -224,5 +224,25 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   }
 }
 
+// ---- resync by the time left on the printer screen (M73 R) ----
+{
+  const { timeForRemaining } = await import('../js/timeline.js');
+  const { parsed, meta } = await load(`${dir}/mini_cube_b.bgcode`);
+  parsed.meta.slicerEstimate = parseDuration(meta.print['estimated printing time (normal mode)']);
+  for (const sp of [100, 50]) {
+    const tl = buildTimeline(parsed, PRINTERS['prusa-mini'], { nozzleNow: 170, bedNow: 85, speedPct: sp });
+    let worst = 0, mono = true, prev = -1;
+    for (const m of [25, 15, 8, 3]) {
+      const shown = m * 100 / sp;            // the MINI shows R scaled by 100 / speed %
+      const t = timeForRemaining(tl, shown);
+      if (t <= prev) mono = false; prev = t;
+      worst = Math.max(worst, Math.abs((tl.total - t) / 60 - shown));
+    }
+    check(`resync by time left lands within ~1 min of it (${sp}% speed)`, mono && worst < 1.5 * 100 / sp, `worst ${worst.toFixed(2)} min (one R step = ${100 / sp} min on screen)`);
+  }
+  const noR = buildTimeline({ ...parsed, anchors: parsed.anchors.map((a) => ({ ...a, r: NaN })) }, PRINTERS['prusa-mini'], {});
+  check('resync by time left: no R marks -> null (falls back to %)', timeForRemaining(noR, 10) === null);
+}
+
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

@@ -224,9 +224,16 @@
 
   <dialog id="dlg-resync">
     <form method="dialog">
-      <h3>What % does the printer show?</h3>
+      <h3>What does the printer show?</h3>
       <p class="muted small">The sim jumps to exactly that point in the file. Do this right before you walk away from the printer.</p>
-      <div class="resync-input"><input id="resync-val" type="number" inputmode="numeric" min="1" max="100" required><span>%</span></div>
+      <div class="resync-input"><input id="resync-val" type="number" inputmode="numeric" min="1" max="100" aria-label="Progress percent"><span>%</span></div>
+      <div id="resync-left-row" class="resync-left">
+        <span class="label">Time left on its screen <em>(more precise)</em></span>
+        <div class="resync-hm">
+          <label><input id="resync-h" type="number" inputmode="numeric" min="0" max="99" placeholder="0" aria-label="Hours left"><span>h</span></label>
+          <label><input id="resync-m" type="number" inputmode="numeric" min="0" max="59" placeholder="0" aria-label="Minutes left"><span>m</span></label>
+        </div>
+      </div>
       <div class="actions">
         <button value="cancel" class="btn" type="submit" formnovalidate>Cancel</button>
         <button value="ok" class="btn primary" type="submit">Sync</button>

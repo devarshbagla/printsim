@@ -1,5 +1,5 @@
 import { PrintView, FEATURE_COLORS } from './renderer.js';
-import { buildTimeline, stateAt, timeForPercent } from './timeline.js';
+import { buildTimeline, stateAt, timeForPercent, timeForRemaining } from './timeline.js';
 import { FeatureNames, Feature } from './gcode.js';
 import { PRINTERS, AMBIENT, guessPrinter } from './printers.js';
 import { MATERIALS, surfaceFor } from './materials.js';
@@ -789,6 +789,26 @@ async function setWake(on) {
   }
 }
 
+// ---------------------------------------------------------------- resync
+// The MINI's screen shows % (1% steps, ~11 min each on a 19h print) and the time
+// left (from the file's M73 R, whole minutes). Time left is finer, so it wins,
+// unless it disagrees with the % typed alongside it (a typo, most likely).
+function resyncTarget(pct, hStr, mStr) {
+  const hasLeft = hStr.trim() !== '' || mStr.trim() !== '';
+  const mins = (parseFloat(hStr) || 0) * 60 + (parseFloat(mStr) || 0);
+  const hasPct = pct >= 1 && pct <= 100;
+  const tLeft = hasLeft && mins >= 0 ? timeForRemaining(tl, mins) : null;
+  if (tLeft != null) {
+    const leftPct = stateAt(parsed, tl, tLeft + 0.01).percent;
+    if (hasPct && Math.abs(leftPct - pct) > 3) {
+      return { t: timeForPercent(tl, pct), msg: `Time left and % don't match (that time is ~${Math.round(leftPct)}%). Went with ${pct}%.`, warn: true };
+    }
+    return { t: tLeft, msg: `Synced to ${fmtDur(mins * 60)} left` };
+  }
+  if (hasPct) return { t: timeForPercent(tl, pct), msg: `Synced to ${pct}%` };
+  return null;
+}
+
 // ---------------------------------------------------------------- calendar reminders
 // The printers aren't networked and there's no server, so the phone's own
 // calendar does the pinging. See js/ics.js for why each export gets new UIDs.
@@ -1100,13 +1120,15 @@ function wire() {
     const d = $('dlg-resync');
     const cur = Math.floor(stateAt(parsed, tl, simNow()).percent);
     $('resync-val').value = cur > 0 ? cur : '';
+    $('resync-h').value = ''; $('resync-m').value = '';
+    show('resync-left-row', tl.rAnchors && tl.rAnchors.length > 1);
     d.returnValue = '';
     d.onclose = () => {
       if (d.returnValue !== 'ok') return;
-      const v = parseFloat($('resync-val').value);
-      if (!(v >= 1 && v <= 100)) return;
-      syncTo(timeForPercent(tl, v));
-      toast(`Synced to ${v}%`);
+      const r = resyncTarget(parseFloat($('resync-val').value), $('resync-h').value, $('resync-m').value);
+      if (!r) return;
+      syncTo(r.t);
+      toast(r.msg, r.warn ? 4200 : 2400);
     };
     d.showModal();
     setTimeout(() => $('resync-val').select(), 50);
