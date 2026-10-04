@@ -146,6 +146,16 @@
             <select id="material"></select>
           </div>
         </div>
+        <div class="field">
+          <label for="unit" class="label">Which one?</label>
+          <div class="unit-row">
+            <select id="unit"></select>
+            <button id="unit-remove" class="btn icon hidden" type="button" aria-label="Forget this printer" title="Forget this printer">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M5 7h14M10 7V5h4v2M7 7l1 12h8l1-12"/></svg>
+            </button>
+          </div>
+          <p class="hint">Name the lab's printers and each one learns its own speed.</p>
+        </div>
         <p id="material-note" class="hint material-note"></p>
         <div class="field">
           <label for="spool-left" class="label">Filament left on the spool</label>
@@ -263,6 +273,18 @@
         <button value="ok" class="btn primary" type="submit">Save</button>
       </div>
       <button value="cancel" class="linkbtn fin-later" type="submit" formnovalidate>Still printing</button>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-unit">
+    <form method="dialog">
+      <h3>Name this printer</h3>
+      <p class="muted small">Something you'll recognise at the lab. Each named printer learns its own speed.</p>
+      <input id="unit-name" class="unit-name" type="text" maxlength="40" placeholder="MINI by the window" aria-label="Printer name" autocomplete="off">
+      <div class="actions">
+        <button value="cancel" class="btn" type="submit" formnovalidate>Cancel</button>
+        <button value="ok" class="btn primary" type="submit">Add</button>
+      </div>
     </form>
   </dialog>
 

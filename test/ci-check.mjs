@@ -303,5 +303,31 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   check('index.html has no em dash characters', !html.includes('\u2014'));
 }
 
+// ---- named printers: each physical MINI learns its own speed (js/store.js) ----
+{
+  const mem = new Map();
+  globalThis.localStorage = { getItem: (k) => (mem.has(k) ? mem.get(k) : null), setItem: (k, v) => mem.set(k, String(v)), removeItem: (k) => mem.delete(k) };
+  const { addUnit, listUnits, removeUnit, effectiveCalibration, learnCalibration } = await import('../js/store.js');
+  const a = addUnit('prusa-mini', '  MINI   by the window '), b = addUnit('prusa-mini', 'MINI #4');
+  check('units: added, name tidied, listed per model', listUnits('prusa-mini').length === 2 && listUnits('prusa-mini')[0].name === 'MINI by the window' && listUnits('generic').length === 0);
+  check('units: empty name refused', addUnit('prusa-mini', '   ') === null);
+  learnCalibration('prusa-mini', null, 1.2);           // an unnamed print: only the pool learns
+  let e = effectiveCalibration('prusa-mini', a);
+  check('units: a new printer uses the all-MINIs pool until it has a print', e.scope === 'model' && Math.abs(e.factor - 1.2) < 1e-9, JSON.stringify(e));
+  learnCalibration('prusa-mini', a, 1.1); learnCalibration('prusa-mini', a, 1.1);
+  e = effectiveCalibration('prusa-mini', a);
+  check('units: then it uses its own', e.scope === 'unit' && e.n === 2 && Math.abs(e.factor - 1.1) < 1e-9, JSON.stringify(e));
+  const pool = effectiveCalibration('prusa-mini', null);
+  check('units: its prints also teach the pool', pool.n === 3, JSON.stringify(pool));
+  check('units: another printer is unaffected (still on the pool)', effectiveCalibration('prusa-mini', b).scope === 'model');
+  removeUnit(a);
+  check('units: forgetting one deletes its calibration only', !mem.has(`printsim.calib.unit.${a}`) && listUnits().length === 1 && effectiveCalibration('prusa-mini', a).scope === 'model');
+  // calibration must never contain the print-speed scaling: the timeline reports it separately
+  const { parsed } = await load(`${dir}/mini_cube_b.bgcode`);
+  const t50 = buildTimeline(parsed, PRINTERS['prusa-mini'], { factor: 1.1, speedPct: 50 });
+  check('timeline: calFactor is the calibration alone, factor includes speed', t50.calFactor === 1.1 && Math.abs(t50.factor - 2.2) < 1e-9, `${t50.calFactor} / ${t50.factor}`);
+  delete globalThis.localStorage;
+}
+
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

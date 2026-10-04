@@ -24,7 +24,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 
 - No build step: plain ES modules, three.js r170 vendored in `vendor/`, import map in `index.html`. Keep it that way.
 - Everything runs in the browser. User files never leave the device.
-- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v18`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
+- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v19`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
 - File-derived text (file names, config values) goes in via `textContent`, never `innerHTML`.
 - The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops (reshaped in place each frame, never flatter than a 30 mm lift), 190x200 sheet, spool on a stand behind in the filament colour. Static parts merged per material (~44 draw calls).
 - Timelapse speeds are 10x / 50x / 200x / 1000x + layer by layer (2x to 8x was rejected as useless).
@@ -47,7 +47,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 | `js/renderer.js` | `PrintView`: one instanced strand mesh, `uHead` progress uniform, ghost pass, fall shader, camera fit |
 | `js/printer3d.js` | `PrinterModel`: bed-slinger (head X, gantry Z, bed Y), Bowden tube, canvas screen |
 | `js/app.js` | Modes empty/setup/run/done, preview player, run clock (timestamp based), resync, calibration, persistence, ghost tip. Debug: `window.__printsim` (`skip(sec)`, `view`, `support`, `recSeconds`) |
-| `js/store.js` | IndexedDB (file + session) and localStorage (prefs, calibration, `printsim.ghostHint`) |
+| `js/store.js` | IndexedDB (file + session) and localStorage (prefs, calibration, `printsim.ghostHint`). Named printers (`printsim.units`, "Which one?"): each has its own calibration (`printsim.calib.unit.<id>`) and every finish also teaches the model pool (`printsim.calib.<model>`), which a new printer uses until its first print (`effectiveCalibration`, `learnCalibration`). Runs store `calFactor` = calibration only; never feed `tl.factor`/`run.factor` (they include 100/speed%) back in as calibration (`runCal` in app.js handles old sessions) |
 | `js/report.js` | Spaghetti report: when it fails (time + layer + %), grams at stake (net E from `moves.e`, matches PrusaSlicer within 0.4%), why no supports (off, or on but paint-only) |
 | `js/spool.js` | Filament runout: `cumulativeGrams` (net E -> grams, scaled to stated), `runoutMove` (binary search), `spoolCheck` (need / left / tight) |
 | `js/ics.js` | "Remind me": `.ics` with alarms for the finish and filament swaps + Google Calendar link; iOS gets a `data:text/calendar` URL; fresh UIDs per export |

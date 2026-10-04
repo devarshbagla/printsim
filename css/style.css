@@ -617,3 +617,13 @@ dialog .actions { margin-top: 16px; }
 .finish-opt input[type=time]:focus { border-color: var(--accent); }
 #fin-note:empty { display: none; }
 .fin-later { margin-top: 10px; }
+
+/* ---------- which printer (named units) ---------- */
+.unit-row { display: flex; gap: 8px; align-items: center; }
+.unit-row select { flex: 1; min-width: 0; }
+.unit-row .btn.icon { padding: 9px 10px; flex: none; }
+.unit-name {
+  width: 100%; font-size: 17px; padding: 11px 12px;
+  background: rgba(255,255,255,.06); border: 1px solid var(--line-2); border-radius: 12px; outline: none;
+}
+.unit-name:focus { border-color: var(--accent); }

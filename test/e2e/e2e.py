@@ -379,6 +379,39 @@ def main():
         check('spool runout: no JS errors', not errors, '; '.join(errors)[:300])
         ctx.close()
 
+        # ---- named printers + calibration never absorbs the print speed ----
+        errors = []
+        ctx, page = new_page(browser, url, 390, 844, errors)
+        load_sample(page, 'twisted-vase.gcode')
+        page.select_option('#unit', '__add'); page.wait_for_selector('#dlg-unit[open]')
+        page.fill('#unit-name', 'MINI by the window'); page.click('#dlg-unit button[value=ok]')
+        page.wait_for_function("document.getElementById('unit').selectedOptions[0].textContent === 'MINI by the window'")
+        unit_id = page.input_value('#unit')
+        check('units: added printer is selected', unit_id.startswith('u'), unit_id)
+        check('units: estimate says it learns its own speed', 'learns its own speed' in page.inner_text('#setup-est'), page.inner_text('#setup-est'))
+        page.evaluate("(() => { const el = document.getElementById('speed-pct'); el.value = '50'; el.dispatchEvent(new Event('change')); })()")
+        start(page)
+        page.click('#btn-extruding')
+        left = lambda: page.evaluate("""() => { const r = window.__printsim.run, tl = window.__printsim.timeline;
+          return tl.total - (r.anchorSim + (Date.now() - r.anchorWall) / 1000); }""")
+        page.wait_for_timeout(1500)  # the session save to IndexedDB is async: let it land before reloading
+        before = left()
+        page.reload(); page.wait_for_selector('#panel-run:not(.hidden)'); page.wait_for_timeout(800)
+        after = left()
+        check('speed 50%: reopening mid-print keeps the ETA (speed not applied twice)', abs(after - before) < 120, f'{before / 60:.1f} -> {after / 60:.1f} min left')
+        page.evaluate('(s) => window.__printsim.skip(s)', left())
+        page.wait_for_selector('#banner [data-act=finished]')
+        page.click('#banner [data-act=finished]'); page.wait_for_selector('#dlg-finish[open]')
+        page.click('#dlg-finish button[value=ok]'); page.wait_for_selector('#panel-done:not(.hidden)')
+        cal = page.evaluate(f"JSON.parse(localStorage.getItem('printsim.calib.unit.{unit_id}'))")
+        check('speed 50%: an on-time print teaches ~x1.0, not the speed (old bug: x1.6)', cal and cal['n'] == 1 and 0.9 < cal['factor'] < 1.1, str(cal))
+        check('units: done text names the printer', 'MINI by the window' in page.inner_text('#done-text'), page.inner_text('#done-text'))
+        page.click('#btn-again'); page.wait_for_selector('#panel-setup:not(.hidden)')
+        check('units: next estimate uses its own calibration', 'Calibrated for "MINI by the window" from 1 print' in page.inner_text('#setup-est'), page.inner_text('#setup-est'))
+        shot(page, '390x844-units-setup')
+        check('units: no JS errors', not errors, '; '.join(errors)[:300])
+        ctx.close()
+
         # ---- support check + laptop layout ----
         errors = []
         ctx, page = new_page(browser, url, 1280, 780, errors)

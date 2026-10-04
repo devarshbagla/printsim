@@ -3,7 +3,7 @@ import { buildTimeline, stateAt, timeForPercent, timeForRemaining } from './time
 import { FeatureNames, Feature } from './gcode.js';
 import { PRINTERS, AMBIENT, guessPrinter } from './printers.js';
 import { MATERIALS, surfaceFor } from './materials.js';
-import { idbGet, idbSet, idbDel, lsGet, lsSet, getCalibration, addCalibration } from './store.js';
+import { idbGet, idbSet, idbDel, lsGet, lsSet, listUnits, getUnit, addUnit, removeUnit, effectiveCalibration, learnCalibration } from './store.js';
 import { planEvents, buildIcs, googleCalendarUrl } from './ics.js';
 import { clockToWall, wallToClock, expectedEndWall, measureRun } from './finish.js';
 import { spaghettiReport, fmtGrams } from './report.js';
@@ -22,7 +22,7 @@ const SWATCHES = [
   ['Blue', '#1f6feb'], ['Purple', '#7b3fe4'], ['Pink', '#ff6fae'], ['Lavender', '#b9a3f5'],
 ];
 
-const prefs = Object.assign({ color: null, ghost: true, ghostRun: false, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true, printerView: true, spoolLeft: null }, lsGet('printsim.prefs', {}));
+const prefs = Object.assign({ color: null, ghost: true, ghostRun: false, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true, printerView: true, spoolLeft: null, unitId: null }, lsGet('printsim.prefs', {}));
 const savePrefs = () => lsSet('printsim.prefs', prefs);
 // "what's left to print" overlay: on while previewing, off by default while a
 // print runs (the live build reads better on its own); each remembered separately
@@ -36,7 +36,7 @@ let parsed = null;
 let spoolCum = null; // cumulativeGrams for the current file + material
 let tl = null;
 let file = null; // { name, bytes }
-let setup = { printerId: 'prusa-mini', nozzle: AMBIENT, bed: AMBIENT, color: '#ff7a1a', spoolLeft: null };
+let setup = { printerId: 'prusa-mini', unitId: null, nozzle: AMBIENT, bed: AMBIENT, color: '#ff7a1a', spoolLeft: null };
 let run = null;
 let lastUi = 0;
 let thumbUrl = null;
@@ -167,6 +167,7 @@ function onParsed(restore) {
     setup.nozzle = AMBIENT;
     setup.bed = AMBIENT;
     setup.spoolLeft = prefs.spoolLeft > 0 ? prefs.spoolLeft : null;
+    setup.unitId = getUnit(prefs.unitId) ? prefs.unitId : null;
   }
   // the worker already ran the support check for the remembered filament
   setup.material = MATERIALS[parsed.activeMaterial] ? parsed.activeMaterial : (parsed.material || 'PLA');
@@ -204,7 +205,7 @@ function onParsed(restore) {
 
   if (restore && restore.run) {
     run = restore.run;
-    rebuildTimeline(run.factor);
+    rebuildTimeline(runCal(run));
     setMode(restore.mode === 'done' ? 'done' : 'run');
     if (restore.mode === 'done') renderDone(restore.doneText);
   } else {
@@ -215,9 +216,19 @@ function onParsed(restore) {
   }
 }
 
+// The calibration factor a run was predicted with. Older sessions only stored
+// run.factor, which ALSO had the print-speed scaling (100 / speed %) folded in;
+// feeding that back in applied the speed twice, and learning from it baked the
+// speed into the calibration. Undo it for those.
+function runCal(r) {
+  if (r && r.calFactor > 0) return r.calFactor;
+  if (r && r.factor > 0) return r.factor / (100 / (setup.speedPct || 100));
+  return undefined;
+}
+
 function rebuildTimeline(factorOverride) {
   const printer = PRINTERS[setup.printerId] || PRINTERS['prusa-mini'];
-  const factor = factorOverride || getCalibration(printer.id).factor;
+  const factor = factorOverride || effectiveCalibration(printer.id, setup.unitId).factor;
   tl = buildTimeline(parsed, printer, { nozzleNow: setup.nozzle, bedNow: setup.bed, factor, stealth: !!setup.stealth, speedPct: setup.speedPct || 100 });
   // sim time at which the nozzle lays down each END of every piece
   const sm = parsed.segs.move, times = new Float32Array(sm.length * 2);
@@ -278,6 +289,7 @@ function fillSetupForm() {
     sel.appendChild(o);
   }
   sel.value = setup.printerId;
+  fillUnits();
   const ms = $('material');
   ms.innerHTML = '';
   for (const [k, m] of Object.entries(MATERIALS)) {
@@ -394,11 +406,55 @@ function accentHex() {
   return getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ff7a1a';
 }
 
+// "Which one?": the lab's physical printers of this model. Names are typed by
+// the user, so they only ever go in via textContent.
+function fillUnits() {
+  const sel = $('unit');
+  const units = listUnits(setup.printerId);
+  if (setup.unitId && !units.some((u) => u.id === setup.unitId)) setup.unitId = null;
+  sel.textContent = '';
+  const opt = (value, label) => { const o = document.createElement('option'); o.value = value; o.textContent = label; sel.appendChild(o); };
+  opt('', 'Not sure');
+  for (const u of units) opt(u.id, u.name);
+  opt('__add', '+ Add a printer');
+  sel.value = setup.unitId || '';
+  show('unit-remove', !!setup.unitId);
+}
+
+function pickUnit(id) {
+  setup.unitId = id || null;
+  prefs.unitId = setup.unitId;
+  savePrefs();
+  fillUnits();
+  rebuildTimeline();
+  saveSession();
+}
+
+function addUnitDialog() {
+  const d = $('dlg-unit');
+  $('unit-name').value = '';
+  d.returnValue = '';
+  d.onclose = () => {
+    const name = $('unit-name').value.trim();
+    if (d.returnValue !== 'ok' || !name) { fillUnits(); return; }
+    const id = addUnit(setup.printerId, name);
+    pickUnit(id);
+    toast(`Added "${name.slice(0, 40)}". It learns its own speed from each print you finish on it.`, 3600);
+  };
+  d.showModal();
+  setTimeout(() => $('unit-name').focus(), 50);
+}
+
 function updateSetupEstimate() {
   if (!tl) return;
-  const cal = getCalibration(setup.printerId);
+  const cal = effectiveCalibration(setup.printerId, setup.unitId);
+  const unit = getUnit(setup.unitId);
+  const prints = (n) => `${n} print${n > 1 ? 's' : ''}`;
   let txt = `About ${fmtDur(tl.total)} total, including ~${fmtDur(tl.startupEnd)} of warm-up and bed leveling.`;
-  if (cal.n > 0) txt += ` Calibrated from ${cal.n} print${cal.n > 1 ? 's' : ''} (×${cal.factor.toFixed(2)}).`;
+  if (cal.scope === 'unit') txt += ` Calibrated for "${unit.name}" from ${prints(cal.n)} (×${cal.factor.toFixed(2)}).`;
+  else if (unit && cal.n > 0) txt += ` Using all ${unit.model === 'prusa-mini' ? 'MINIs' : 'printers'} (${prints(cal.n)}, ×${cal.factor.toFixed(2)}) until "${unit.name}" has a print of its own.`;
+  else if (unit) txt += ` "${unit.name}" learns its own speed after its first finished print.`;
+  else if (cal.n > 0) txt += ` Calibrated from ${prints(cal.n)} (×${cal.factor.toFixed(2)}).`;
   let el = $('setup-est');
   if (!el) {
     el = document.createElement('p');
@@ -607,9 +663,10 @@ function startPrint() {
     anchorWall: t, anchorSim: 0, running: true,
     startedWall: t, pausedMs: 0, pauseStartWall: null, pauseReason: null,
     extrudeWall: null, pausedAtExtrude: 0,
-    factor: tl.factor, overtime: false,
+    factor: tl.factor, calFactor: tl.calFactor, unitId: setup.unitId || null, overtime: false,
   };
   prefs.printerId = setup.printerId;
+  prefs.unitId = setup.unitId || null;
   savePrefs();
   setMode('run');
   saveSession();
@@ -681,10 +738,14 @@ function printerFinished(finishWall = now()) {
   const printer = PRINTERS[setup.printerId];
   let text = `Took ${fmtDur(actualTotal)} (sim predicted ${fmtDur(tl.total)}).`;
   if (ratio > 0.6 && ratio < 1.6 && predictedMotion > 120) {
-    const cal = addCalibration(printer.id, run.factor * ratio);
+    const unit = getUnit(run.unitId);
+    const learned = learnCalibration(printer.id, unit && unit.id, (runCal(run) || 1) * ratio);
+    const cal = learned.unit || learned.model;
     const off = Math.round((ratio - 1) * 100);
     const how = Math.abs(off) < 1 ? 'right on time' : `${Math.abs(off)}% ${off > 0 ? 'slower' : 'faster'} than predicted`;
-    text += ` This one ran ${how}. Future estimates for the ${printer.name} are now calibrated from ${cal.n} print${cal.n > 1 ? 's' : ''} (×${cal.factor.toFixed(2)}).`;
+    const who = unit ? `"${unit.name}"` : `the ${printer.name}`;
+    text += ` This one ran ${how}. Future estimates for ${who} are now calibrated from ${cal.n} print${cal.n > 1 ? 's' : ''} (×${cal.factor.toFixed(2)}).`;
+    if (!unit && listUnits(printer.id).length === 0) text += ' Tip: name this printer in setup ("Which one?") so each printer learns its own speed.';
   } else {
     text += ' That was too far off to learn from (forgot to hit start on time?), so calibration was left alone.';
   }
@@ -1169,6 +1230,7 @@ function wire() {
 
   $('printer').onchange = (e) => {
     setup.printerId = e.target.value;
+    fillUnits();
     const p = PRINTERS[setup.printerId];
     view.setBed(p.bed.w, p.bed.d);
     view.setData(parsed.segs, parsed.bbox, parsed.layers);
@@ -1177,6 +1239,15 @@ function wire() {
     saveSession();
   };
   $('material').onchange = (e) => applyMaterial(e.target.value);
+  $('unit').onchange = (e) => (e.target.value === '__add' ? addUnitDialog() : pickUnit(e.target.value));
+  $('unit-remove').onclick = async () => {
+    const u = getUnit(setup.unitId);
+    if (!u) return;
+    if (await confirmBox(`Forget "${u.name}"?`, 'Its learned speed is deleted. Other printers keep theirs, and its prints stay in the all-printers average.', 'Forget')) {
+      removeUnit(u.id);
+      pickUnit(null);
+    }
+  };
   $('spool-left').addEventListener('input', readSpoolLeft);
   $('spool-left').addEventListener('change', readSpoolLeft);
   $('stealth').onchange = (e) => { setup.stealth = e.target.checked; rebuildTimeline(); applyScrub(); saveSession(); };
@@ -1188,7 +1259,7 @@ function wire() {
     const t = now();
     const st = stateAt(parsed, tl, simNow(t));
     setup.speedPct = readSpeed(e.target);
-    rebuildTimeline(run.factor);
+    rebuildTimeline(runCal(run));
     const s2 = tl.tStart(st.move) + tl.dur[st.move] * st.frac;
     run.anchorSim = s2;
     run.anchorWall = t;

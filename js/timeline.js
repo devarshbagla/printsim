@@ -188,7 +188,7 @@ export function buildTimeline(parsed, printer, opts = {}) {
 
   return {
     tEnd, dur, total: t, startupEnd, pauses, phases, phaseByMove, pAnchors, rAnchors,
-    slicerTotal, motionTotal: t - startupEnd, factor, stealth, speedPct,
+    slicerTotal, motionTotal: t - startupEnd, factor, calFactor: opts.factor || 1, stealth, speedPct,
     tStart,
   };
 }
