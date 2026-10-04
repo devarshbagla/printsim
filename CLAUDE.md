@@ -98,7 +98,43 @@ Cessna kits, YAFIC cube on his Google Drive) are not in the repo; all were 0%. A
 - Debugging a physics flag: break failing samples down by layer and feature, then plot slices and a vertical cross-section (matplotlib). Found the YAFIC hinge gap that way.
 - After a push, poll `https://devarshbagla.github.io/printsim/sw.js` for the new cache name to confirm deploy.
 
+## Session log (latest first)
+
+Each line is a pushed commit; CI was green and the deploy confirmed for every one.
+
+- **v19 `9330ead`** Calibration per physical printer. "Which one?" picker under Printer (Not sure / named printers / + Add a printer, bin button forgets one). Each named printer learns its own factor; every finish also teaches the model pool, used until a printer has its own print. **Bug fixed**: runs used to save `tl.factor` (calibration x 100/speed%), so at non-100% speed reopening mid-print applied the speed twice and an on-time 50% print saved x1.6 as calibration. Runs now store `calFactor`; `runCal()` converts old sessions.
+- **v18 `89f969e`** (built by Cursor Auto from a prompt Claude wrote, then reviewed by Claude: clean) Filament runout prediction: "Filament left on the spool" field in setup, warning (runs out at time/%/layer, or "cutting it close"), auto-pause at the runout move like an M600 (`type: 'runout'` in `tl.pauses`), calendar event. MINI pauses and unloads on runout (Prusa-Firmware-Buddy issue #1279). Known weak test: "runoutMove(half)" computes its expected value the same way as the code.
+- **v17 `c959059`** "When did it finish?" prompt (Just now / Earlier at [time], prefilled with the expected finish when >10 min late / It failed / Still printing). Opens from the ETA banner, the calendar finish alert (`?done=1`), "End print" past 90%, and on return >5 min after the ETA. Fixed: tapping "done" hours late used to record "now" and poison calibration. Placeholder em dashes in index.html removed. `__printsim.skip()` now saves the session.
+- **v16 `ddd5d36`** Resync by the time left on the printer screen (`rAnchors` from M73 R, `timeForRemaining`). Finer than 1% steps on long prints. Undoes the MINI's speed scaling of R (assumption, from Prusa-Firmware-Buddy issue #708: on-screen time left changes with Tune > Speed; check once at the lab at non-100% speed). If time left and % disagree by >3%, it warns and uses the %.
+- **v15 and earlier**: see the handoff doc and `git log`. Highlights: CI + Playwright e2e, calendar reminders, spaghetti report with grams and mid-air parts, video export, real strand shading, MINI model from Prusa drawings, volume-conserving falls, heat-aware falls, nozzle blobs, YAFIC false alarm fixed, filament switch in the worker, landing layout, smooth head motion, Bowden tube that never goes taut.
+
+## Roadmap (agreed with Devarsh, Prusa MINI+ only, no new printers)
+
+Done: #1 resync by time left, #3 per-printer calibration, #4 finish prompt, #5 runout.
+Left, in Claude's recommended order:
+- **#6 + #7 topple and warp warnings** (planned as the next Cursor task; self-contained rule checks): bed-slinger topple risk for tall parts with a small footprint (height vs first-layer footprint, suggest a brim); warp risk for large flat PETG/ABS/ASA parts on the open-frame MINI+.
+- **#2 snap-to-resync**: point the phone at the printer screen, on-device OCR reads % and time left. Nothing leaves the phone.
+- **#8 "risk" colour mode**: colour strands by physics state (held, sagging, hinged, falling). The shader already gets the data; touches renderer.js, so Claude, not Cursor.
+- **#9 multi-printer dashboard** (several MINIs at once), **#10 laptop to phone handoff via QR** (start time, speed, file hash), **#11 status link** (ETA countdown URL, no server).
+- Skip for now: more rendering realism (past diminishing returns).
+
+## Working with Cursor
+
+- Devarsh runs some tasks in Cursor (Auto model). Claude writes a very detailed prompt: read CLAUDE.md etc. first, exact files and function names, hard rules, tests to add, docs to update, and "do the git yourself": pull --rebase, commit, push to main, poll the GitHub Actions API until green (fix up to twice, then stop and report), poll live `sw.js` for the new cache name.
+- Only one agent touches the repo at a time. When Cursor reports done, Claude pulls, reviews the diff, and reruns the Node gate before starting anything.
+- Good Cursor tasks: self-contained, no physics/renderer/parser changes. Keep calibration/storage migrations and shader work for Claude.
+
+## Test gotchas learned this session
+
+- The session save (`saveSession`, IndexedDB) is async: wait ~1.5 s after an action before `page.reload()` in e2e, or the reload restores the previous session.
+- After clicking OK in a dialog, wait for `!dialog.open` before reading the toast (headless runs ~1 fps).
+- e2e is 102 checks, about 7 minutes; run it detached (`setsid nohup`) and poll its log, since a single command is capped at 10 minutes.
+
 ## Open items
 
-- Waiting on Devarsh's real-device feedback: phone layout, landscape side card, landing (printer now has its own band/column, never behind text), ghost tip on a laptop, calendar reminders on iOS, video export, real print vs sim timing (tap "Printer finished" to calibrate).
-- Ideas, not requested: more printers (MK4/MK4S, Core One, Bambu), `.gcode.3mf`, laptop-to-phone handoff.
+- Waiting on Devarsh's real-device feedback: phone layout, landscape side card, landing, ghost tip on a laptop, calendar reminders on iOS, video export, the new finish prompt, named printers.
+- **The real print vs sim timing test at the Brandeis lab still hasn't happened.** It's the most valuable thing left: start a print, tap Start, name the printer, and answer "When did it finish?".
+- iOS: if printsim runs from the home screen, the calendar's `?done=1` link opens in Safari, which has separate storage; it shows a toast pointing back to the home-screen app.
+- Don't print Devarsh's Nintendo/Switch stand as sliced: supports are paint-only with nothing painted, 8 drips start in mid-air.
+- People: Tim **Hebert** (one r), Brandeis MakerLab / Automation Lab, embedded systems; a meeting about printsim was planned. The feature list prepared for it predates v6 to v19.
+- Ideas, not requested: more printers (MK4/MK4S, Core One, Bambu), `.gcode.3mf`.
