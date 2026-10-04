@@ -26,6 +26,7 @@ It's a simulation, not a camera. If the real print fails, printsim will happily 
   - **Resync**: type the % shown on the printer and the sim jumps to exactly that spot in the file.
   - **Learns your printer**: tap "Printer finished" at the end and future estimates for that printer get calibrated.
 - **Filament changes (`M600`)** auto-pause the sim. Tap Resume when the printer carries on.
+- **Filament runout prediction**: type how many grams are left on the spool and printsim warns if it'll run out mid-print, then auto-pauses at that moment so you can load a new spool (same as the MINI+ filament sensor).
 - **Survives closing the tab**: the file and clock are stored locally, and time is computed from timestamps, so reopening puts you exactly where the print should be.
 - **Private**: runs 100% in the browser. Files never leave your device. No server, no account.
 - Installable as a home-screen app, works offline, optional keep-screen-on.

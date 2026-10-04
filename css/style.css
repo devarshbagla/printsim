@@ -247,6 +247,7 @@ select:focus, .temps input:focus, .resync-input input:focus { border-color: var(
 .temps label { display: flex; align-items: center; gap: 8px; font-size: 14px; color: var(--muted); }
 .temps input { width: 100%; min-width: 0; font-family: var(--display); font-size: 17px; color: var(--text); padding: 9px 10px; }
 .temps span { color: var(--muted); }
+.spool-amt { grid-template-columns: minmax(0, 160px); }
 
 .swatches { display: flex; flex-wrap: wrap; gap: 9px; }
 .swatch {

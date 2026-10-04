@@ -91,6 +91,7 @@ Also checked and kept: the Z motor sits **on top** of the column under the Z-top
 | Module workers (Safari 15), DecompressionStream (Safari 16.4) | [Safari 15](https://webkit.org/blog/11989/new-webkit-features-in-safari-15/), [16.4](https://webkit.org/blog/13966/webkit-features-in-safari-16-4/) |
 | GitHub Free: Pages in public repositories | [GitHub Docs](https://docs.github.com/get-started/learning-about-github/githubs-products) |
 | Touch: one finger rotates, two fingers pinch/pan | three.js OrbitControls r170 source |
+| Filament runout: net E converted to grams, scaled to the file's stated grams, matches PrusaSlicer within 0.4%; MINI pauses and unloads on runout | same grams math as `js/report.js`; [Buddy #1279](https://github.com/prusa3d/Prusa-Firmware-Buddy/issues/1279) |
 
 ## Still estimates (no public data)
 

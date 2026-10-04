@@ -267,5 +267,41 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   check('calendar finish alert links to the finish prompt', ev[0].description.includes('https://x/p/?done=1'));
 }
 
+// ---- filament runout (js/spool.js) ----
+{
+  const { cumulativeGrams, runoutMove, spoolCheck } = await import('../js/spool.js');
+  const { statedGrams } = await import('../js/report.js');
+  const { planEvents } = await import('../js/ics.js');
+  const { parsed, m } = await (async () => {
+    const { parsed } = await load(`${dir}/mini_cube_b.bgcode`);
+    return { parsed, m: detectMaterial(parsed.meta.config) };
+  })();
+  const want = statedGrams(parsed.meta.config);
+  const cum = cumulativeGrams(parsed, m);
+  const need = cum[cum.length - 1];
+  check('spool: cumulativeGrams ends within 1% of statedGrams', want > 0 && Math.abs(need / want - 1) < 0.01, `${need.toFixed(3)} vs ${want} g`);
+  let mono = true;
+  for (let i = 1; i < cum.length; i++) if (cum[i] < cum[i - 1]) { mono = false; break; }
+  check('spool: cumulativeGrams never decreases', mono);
+  const halfG = need / 2;
+  const mid = runoutMove(cum, halfG);
+  // halfway by grams: the first move whose cum reaches half
+  let halfMove = 0;
+  for (let i = 0; i < cum.length; i++) if (cum[i] >= halfG) { halfMove = i; break; }
+  check('spool: runoutMove(half) lands within 10% of the halfway move by grams',
+    mid === halfMove && Math.abs(mid - halfMove) / Math.max(cum.length, 1) < 0.1,
+    `move ${mid}/${cum.length - 1} (halfMove ${halfMove})`);
+  check('spool: runoutMove above total returns -1', runoutMove(cum, need + 1) === -1);
+  const tight = spoolCheck(cum, need + 1);
+  check('spool: spoolCheck flags tight when left is need + 1 g', tight.move < 0 && tight.tight && Math.abs(tight.need - need) < 1e-9, JSON.stringify(tight));
+  const nowMs = Date.UTC(2026, 8, 29, 4, 0, 0);
+  const ev = planEvents({ nowMs, simNow: 0, total: 3600, pauses: [{ t: 1200, type: 'runout' }], name: 'cube.bgcode' });
+  check('spool: planEvents runout title is "Filament runs out"',
+    ev.some(e => e.kind === 'runout' && e.title.startsWith('Filament runs out')),
+    ev.map(e => e.title).join(' | '));
+  const html = readFileSync(`${here}index.html`, 'utf8');
+  check('index.html has no em dash characters', !html.includes('\u2014'));
+}
+
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

@@ -341,6 +341,44 @@ def main():
         check('finish flow: no JS errors', not errors, '; '.join(errors)[:300])
         ctx.close()
 
+        # ---- filament runout: warn in setup, auto-pause mid-print ----
+        errors = []
+        ctx, page = new_page(browser, url, 390, 844, errors)
+        load_sample(page, 'twisted-vase.gcode')
+        meta = page.inner_text('#file-meta')
+        m = re.search(r'([\d.]+)\s*g', meta)
+        check('spool: file meta shows grams used', m is not None, meta)
+        need = float(m.group(1)) if m else 9.49
+        left = round(need / 3, 1)
+        page.fill('#spool-left', str(left))
+        page.dispatch_event('#spool-left', 'input')
+        page.wait_for_function("!document.getElementById('spool-warn').classList.contains('hidden')")
+        warn = page.inner_text('#spool-warn')
+        check('spool: warning says it runs out', 'Runs out' in warn, warn[:180])
+        page.fill('#spool-left', '')
+        page.dispatch_event('#spool-left', 'input')
+        page.wait_for_function("document.getElementById('spool-warn').classList.contains('hidden')")
+        check('spool: clearing the field hides the warning', page.is_hidden('#spool-warn'))
+        page.fill('#spool-left', str(left))
+        page.dispatch_event('#spool-left', 'input')
+        page.wait_for_function("!document.getElementById('spool-warn').classList.contains('hidden')")
+        start(page)
+        page.click('#btn-extruding')
+        # jump just past the runout pause
+        page.evaluate("""() => {
+          const p = window.__printsim.timeline.pauses.find(x => x.type === 'runout');
+          if (!p) throw new Error('no runout pause');
+          window.__printsim.skip(p.t + 2);
+        }""")
+        page.wait_for_function("document.getElementById('btn-pause').textContent === 'Resume'")
+        page.wait_for_function("document.getElementById('banner').innerText.includes('Filament ran out')")
+        check('spool: auto-pauses at runout with the right banner',
+              page.inner_text('#btn-pause') == 'Resume' and 'Filament ran out' in page.inner_text('#banner'),
+              page.inner_text('#banner')[:120])
+        shot(page, '390x844-spool-runout')
+        check('spool runout: no JS errors', not errors, '; '.join(errors)[:300])
+        ctx.close()
+
         # ---- support check + laptop layout ----
         errors = []
         ctx, page = new_page(browser, url, 1280, 780, errors)

@@ -109,6 +109,7 @@
       </div>
 
       <div id="support-warn" class="warn hidden" role="alert"></div>
+      <div id="spool-warn" class="warn hidden" role="status"></div>
 
       <div class="scrub">
         <div class="scrub-head"><span class="label">Preview</span><span id="scrub-label" class="muted small"></span></div>
@@ -146,6 +147,13 @@
           </div>
         </div>
         <p id="material-note" class="hint material-note"></p>
+        <div class="field">
+          <label for="spool-left" class="label">Filament left on the spool</label>
+          <div class="temps spool-amt">
+            <label><input id="spool-left" type="number" inputmode="numeric" min="0" max="3000" placeholder="Full spool" aria-label="Filament left on the spool, grams"><span>g</span></label>
+          </div>
+          <p class="hint">Optional. Weigh the spool and subtract the empty spool weight. Leave blank for a full spool.</p>
+        </div>
         <div class="field">
           <span class="label">Right now the printer is at</span>
           <div class="temps">

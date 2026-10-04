@@ -61,14 +61,18 @@ export function planEvents({ nowMs, simNow, total, pauses = [], name, printer = 
   const tail = [printer && `Printer: ${printer}`, url && `Open printsim: ${url}`].filter(Boolean).join('\n');
   const events = ahead.map((p, i) => ({
     kind: p.type,
-    title: p.type === 'filament' ? `Filament swap: ${label}` : `Print pauses: ${label}`,
+    title: p.type === 'filament' ? `Filament swap: ${label}`
+      : p.type === 'runout' ? `Filament runs out: ${label}`
+      : `Print pauses: ${label}`,
     start: at(p.t),
     end: at(p.t) + 10 * 60e3,
     alarms: [5, 0],
     description: [
       p.type === 'filament'
         ? 'The printer stops here for a filament change. Swap it, then tap Resume in printsim.'
-        : 'The file pauses the printer here. Tap Resume in printsim when it carries on.',
+        : p.type === 'runout'
+          ? 'printsim predicts the spool runs out here. The printer pauses and unloads. Load a new spool, then tap Resume in printsim.'
+          : 'The file pauses the printer here. Tap Resume in printsim when it carries on.',
       i > 0 ? 'Time assumes the earlier stop was instant, so it may run a little late.' : '',
       tail,
     ].filter(Boolean).join('\n\n'),

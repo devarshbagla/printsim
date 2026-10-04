@@ -7,6 +7,7 @@ import { idbGet, idbSet, idbDel, lsGet, lsSet, getCalibration, addCalibration } 
 import { planEvents, buildIcs, googleCalendarUrl } from './ics.js';
 import { clockToWall, wallToClock, expectedEndWall, measureRun } from './finish.js';
 import { spaghettiReport, fmtGrams } from './report.js';
+import { cumulativeGrams, runoutMove, spoolCheck } from './spool.js';
 import { TimelapseRecorder, recordingType } from './recorder.js';
 
 const $ = (id) => document.getElementById(id);
@@ -21,7 +22,7 @@ const SWATCHES = [
   ['Blue', '#1f6feb'], ['Purple', '#7b3fe4'], ['Pink', '#ff6fae'], ['Lavender', '#b9a3f5'],
 ];
 
-const prefs = Object.assign({ color: null, ghost: true, ghostRun: false, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true, printerView: true }, lsGet('printsim.prefs', {}));
+const prefs = Object.assign({ color: null, ghost: true, ghostRun: false, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true, printerView: true, spoolLeft: null }, lsGet('printsim.prefs', {}));
 const savePrefs = () => lsSet('printsim.prefs', prefs);
 // "what's left to print" overlay: on while previewing, off by default while a
 // print runs (the live build reads better on its own); each remembered separately
@@ -32,9 +33,10 @@ const ghostOn = () => !!prefs[ghostKey()];
 let view;
 let mode = 'empty'; // empty | setup | run | done
 let parsed = null;
+let spoolCum = null; // cumulativeGrams for the current file + material
 let tl = null;
 let file = null; // { name, bytes }
-let setup = { printerId: 'prusa-mini', nozzle: AMBIENT, bed: AMBIENT, color: '#ff7a1a' };
+let setup = { printerId: 'prusa-mini', nozzle: AMBIENT, bed: AMBIENT, color: '#ff7a1a', spoolLeft: null };
 let run = null;
 let lastUi = 0;
 let thumbUrl = null;
@@ -164,10 +166,12 @@ function onParsed(restore) {
     setup.color = prefs.color || (/^#[0-9a-f]{6}$/i.test(fileColour) ? fileColour.toLowerCase() : '#ff7a1a');
     setup.nozzle = AMBIENT;
     setup.bed = AMBIENT;
+    setup.spoolLeft = prefs.spoolLeft > 0 ? prefs.spoolLeft : null;
   }
   // the worker already ran the support check for the remembered filament
   setup.material = MATERIALS[parsed.activeMaterial] ? parsed.activeMaterial : (parsed.material || 'PLA');
   parsed.activeMaterial = setup.material;
+  refreshSpoolCum();
   view.setCurl(MATERIALS[setup.material].curl);
   view.setSurface(surfaceFor(setup.material, cfg));
   const printer = PRINTERS[setup.printerId] || PRINTERS['prusa-mini'];
@@ -224,9 +228,18 @@ function rebuildTimeline(factorOverride) {
     times[i * 2 + 1] = f1 ? ts + d * f1[i] : tl.tEnd[k];
   }
   view.setSegTimes(times);
+  // spool runout: one auto-pause, like an M600 (assume the new spool is full)
+  if (setup.spoolLeft > 0 && spoolCum) {
+    const move = runoutMove(spoolCum, setup.spoolLeft);
+    if (move >= 0) {
+      tl.pauses.push({ t: tl.tStart(move), move, type: 'runout' });
+      tl.pauses.sort((a, b) => a.t - b.t);
+    }
+  }
   updateSetupEstimate();
   updateSpeedNote();
   renderSupportWarning(); // says when it goes wrong, which moves with the timeline
+  renderSpoolWarning();
 }
 
 // ---------------------------------------------------------------- modes
@@ -275,6 +288,7 @@ function fillSetupForm() {
   }
   ms.value = setup.material;
   updateMaterialNote();
+  $('spool-left').value = setup.spoolLeft > 0 ? setup.spoolLeft : '';
   const hasSilent = parsed.silentAnchors && parsed.silentAnchors.length > 1;
   show('stealth-row', hasSilent);
   $('stealth').checked = hasSilent && !!setup.stealth;
@@ -337,10 +351,43 @@ async function applyMaterial(key) {
   view.setCurl(MATERIALS[key].curl);
   view.setSurface(surfaceFor(key, parsed.meta.config));
   view.setData(parsed.segs, parsed.bbox, parsed.layers);
-  rebuildTimeline(); // also re-renders the support warning
+  refreshSpoolCum();
+  rebuildTimeline(); // also re-renders the support / spool warnings
   updateMaterialNote();
   applyScrub();
   saveSession();
+}
+
+function refreshSpoolCum() {
+  spoolCum = parsed ? cumulativeGrams(parsed, setup.material) : null;
+}
+
+function readSpoolLeft() {
+  const v = parseFloat($('spool-left').value);
+  setup.spoolLeft = isFinite(v) && v > 0 ? Math.min(Math.max(v, 0), 3000) : null;
+  prefs.spoolLeft = setup.spoolLeft;
+  savePrefs();
+  renderSpoolWarning();
+  saveSession();
+}
+
+function renderSpoolWarning() {
+  const box = $('spool-warn');
+  if (!parsed || !tl || !spoolCum || !(setup.spoolLeft > 0)) { show(box, false); return; }
+  const chk = spoolCheck(spoolCum, setup.spoolLeft);
+  if (chk.move < 0 && !chk.tight) { show(box, false); return; }
+  box.textContent = '';
+  const b = document.createElement('b');
+  if (chk.move >= 0) {
+    const tIn = Math.max(0, tl.tStart(chk.move) - tl.startupEnd);
+    const st = stateAt(parsed, tl, tl.tStart(chk.move));
+    b.textContent = `Runs out of filament about ${fmtDur(tIn)} in (${Math.floor(st.percent)}%, layer ${st.layer + 1})`;
+    box.append(b, `This print needs about ${fmtGrams(chk.need)} and the spool has ${fmtGrams(chk.left)}. Load a fuller spool, or plan to be there to swap it.`);
+  } else {
+    b.textContent = 'Cutting it close on filament';
+    box.append(b, `Needs about ${fmtGrams(chk.need)}, the spool has ${fmtGrams(chk.left)}. Spool weights are rough, so a fuller spool is safer.`);
+  }
+  show(box, true);
 }
 
 function accentHex() {
@@ -762,6 +809,7 @@ function updateRunUI(t) {
   const banner = $('banner');
   let html = '';
   if (!run.running && run.pauseReason === 'filament') html = '<b>Filament change</b>Swap the filament, then tap Resume the moment the printer carries on.';
+  else if (!run.running && run.pauseReason === 'runout') html = '<b>Filament ran out</b>The printer stopped to unload. Load a new spool, then tap Resume when it carries on.';
   else if (!run.running && run.pauseReason === 'pause') html = '<b>The file pauses here</b>Tap Resume when the printer continues.';
   else if (!run.running) html = '<b>Paused</b>Tap Resume when the printer is going again.';
   else if (ended && !run.overtime) html = '<b>Should be done about now</b><span class="banner-actions"><button class="btn primary" data-act="finished" type="button">It finished</button><button class="btn" data-act="overtime" type="button">Still going</button></span>';
@@ -865,7 +913,7 @@ function resyncTarget(pct, hStr, mStr) {
 // The printers aren't networked and there's no server, so the phone's own
 // calendar does the pinging. See js/ics.js for why each export gets new UIDs.
 const isIOS = () => /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
-const CAL_LABEL = { finish: 'Print done', filament: 'Filament swap', pause: 'Print pauses' };
+const CAL_LABEL = { finish: 'Print done', filament: 'Filament swap', pause: 'Print pauses', runout: 'Filament runs out' };
 
 function calendarEvents() {
   const t = now();
@@ -900,7 +948,7 @@ function openCalendar() {
   if (!run.running) notes.push('The clock is paused, so these times assume it resumes right now.');
   notes.push('Resync later? Add it again and delete the old events.');
   $('cal-note').textContent = notes.join(' ');
-  const finish = evs[evs.length - 1], swap = evs.find(e => e.kind === 'filament');
+  const finish = evs[evs.length - 1], swap = evs.find(e => e.kind === 'filament' || e.kind === 'runout');
   $('cal-google').href = googleCalendarUrl(finish);
   show('cal-google-swap', !!swap);
   if (swap) $('cal-google-swap').href = googleCalendarUrl(swap);
@@ -1129,6 +1177,8 @@ function wire() {
     saveSession();
   };
   $('material').onchange = (e) => applyMaterial(e.target.value);
+  $('spool-left').addEventListener('input', readSpoolLeft);
+  $('spool-left').addEventListener('change', readSpoolLeft);
   $('stealth').onchange = (e) => { setup.stealth = e.target.checked; rebuildTimeline(); applyScrub(); saveSession(); };
   const readSpeed = (el) => { const v = parseFloat(el.value); return v >= 10 && v <= 999 ? v : 100; };
   $('speed-pct').addEventListener('change', (e) => { setup.speedPct = readSpeed(e.target); rebuildTimeline(); applyScrub(); saveSession(); });
@@ -1257,7 +1307,7 @@ async function handleFile(f) {
 
 async function newFile() {
   if (mode === 'run' && !(await confirmBox('Close this print?', 'The running sim will stop and the file is unloaded.', 'Close'))) return;
-  run = null; parsed = null; tl = null; file = null;
+  run = null; parsed = null; spoolCum = null; tl = null; file = null;
   await idbDel('file');
   await idbDel('session');
   view.setData({ start: new Float32Array(0), end: new Float32Array(0), meta: new Float32Array(0), move: new Uint32Array(0) }, null);
