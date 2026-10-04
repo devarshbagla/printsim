@@ -597,3 +597,22 @@ dialog .actions { margin-top: 16px; }
 }
 .resync-hm input:focus { border-color: var(--accent); }
 .resync-hm span { font-family: var(--display); font-size: 18px; color: var(--muted); }
+
+/* ---------- when did it finish? ---------- */
+.finish-opts { display: flex; flex-direction: column; gap: 8px; }
+.finish-opt {
+  display: flex; align-items: center; gap: 10px; min-height: 48px;
+  padding: 8px 12px; border-radius: 12px; cursor: pointer;
+  background: rgba(255,255,255,.04); border: 1px solid var(--line);
+  font-size: 15px; font-weight: 500;
+}
+.finish-opt:has(input[type=radio]:checked) { border-color: color-mix(in srgb, var(--accent) 60%, transparent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.finish-opt input[type=radio] { width: 18px; height: 18px; accent-color: var(--accent); margin: 0; }
+.finish-opt input[type=time] {
+  margin-left: auto; min-width: 0; color-scheme: dark;
+  background: rgba(255,255,255,.06); border: 1px solid var(--line-2); border-radius: 10px;
+  padding: 6px 8px; font-family: var(--display); font-size: 16px; outline: none;
+}
+.finish-opt input[type=time]:focus { border-color: var(--accent); }
+#fin-note:empty { display: none; }
+.fin-later { margin-top: 10px; }

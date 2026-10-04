@@ -52,8 +52,9 @@ const cleanName = (name) => String(name || 'your print').replace(/\.(b?gcode|gco
  * @param {string} o.name      file name
  * @param {string} [o.printer] printer name
  * @param {string} [o.url]     link back to printsim
+ * @param {string} [o.finishUrl] link that opens the "when did it finish?" prompt
  */
-export function planEvents({ nowMs, simNow, total, pauses = [], name, printer = '', url = '' }) {
+export function planEvents({ nowMs, simNow, total, pauses = [], name, printer = '', url = '', finishUrl = '' }) {
   const label = cleanName(name);
   const ahead = pauses.filter((p) => p.t > simNow + 0.01).sort((a, b) => a.t - b.t);
   const at = (t) => nowMs + Math.max(0, t - simNow) * 1000;
@@ -83,7 +84,9 @@ export function planEvents({ nowMs, simNow, total, pauses = [], name, printer = 
       `printsim predicts ${label} finishes around now.`,
       ahead.length ? `Plus however long the ${ahead.length > 1 ? `${ahead.length} stops take` : 'stop takes'} (filament swap or pause).` : '',
       'Resynced or changed the speed? Add it to your calendar again and delete this one.',
-      tail,
+      finishUrl ? `Finished? Tell printsim when, so it learns how fast this printer really is: ${finishUrl}` : '',
+      printer ? `Printer: ${printer}` : '',
+      finishUrl ? '' : tail,
     ].filter(Boolean).join('\n\n'),
   });
   return events;

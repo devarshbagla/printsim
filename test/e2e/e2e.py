@@ -170,7 +170,11 @@ def main():
                     page.click('#btn-resync'); page.wait_for_selector('#dlg-resync[open]')
                     page.fill('#resync-val', pct); page.fill('#resync-h', h); page.fill('#resync-m', m)
                     page.click('#dlg-resync button[value=ok]')
-                    page.wait_for_function("document.getElementById('toast').textContent.startsWith('Synced') || document.getElementById('toast').textContent.includes('match')")
+                    page.wait_for_function("!document.getElementById('dlg-resync').open")
+                    try:
+                        page.wait_for_function("document.getElementById('toast').textContent.startsWith('Synced') || document.getElementById('toast').textContent.includes('match')", timeout=20_000)
+                    except Exception:
+                        print('DEBUG resync', pct, h, m, page.evaluate("({ toast: document.getElementById('toast').textContent, ret: document.getElementById('dlg-resync').returnValue, open: [...document.querySelectorAll('dialog')].filter(d => d.open).map(d => d.id), val: [document.getElementById('resync-val').value, document.getElementById('resync-h').value, document.getElementById('resync-m').value] })"), flush=True)
                     msg = page.inner_text('#toast')
                     page.evaluate("document.getElementById('toast').textContent = ''")
                     return msg
@@ -303,6 +307,38 @@ def main():
         else:
             print('SKIP  this Chromium cannot record video')
         check('timelapse video: no JS errors', not errors, '; '.join(errors)[:300])
+        ctx.close()
+
+        # ---- "when did it finish?": back 3 h late, calendar deep link, failed, no nagging ----
+        errors = []
+        ctx, page = new_page(browser, url, 390, 844, errors)
+        load_sample(page, 'twisted-vase.gcode')
+        start(page)
+        page.click('#btn-extruding')
+        page.reload(); page.wait_for_selector('#panel-run:not(.hidden)'); page.wait_for_timeout(800)
+        check('finish: no prompt before the ETA', not page.evaluate("document.getElementById('dlg-finish').open"))
+        page.evaluate('window.__printsim.skip(window.__printsim.timeline.total + 3 * 3600)')
+        expected = page.evaluate("""() => { const r = window.__printsim.run, tl = window.__printsim.timeline;
+          const d = new Date(r.anchorWall + (tl.total - r.anchorSim) * 1000);
+          return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0'); }""")
+        page.reload(); page.wait_for_selector('#dlg-finish[open]')
+        check('finish: coming back late asks when it finished', True)
+        check('finish: prefilled with the expected finish, not "now"', page.is_checked('#fin-at') and page.input_value('#fin-time') == expected,
+              f"{page.input_value('#fin-time')} vs {expected}")
+        shot(page, '390x844-finish-dialog')
+        page.click('#dlg-finish button[value=ok]')
+        page.wait_for_selector('#panel-done:not(.hidden)')
+        done = page.inner_text('#done-text')
+        check('finish: the late check-in still calibrates (measured to the stated time)', 'calibrated from 1 print' in done, done)
+        page.click('#btn-again'); page.wait_for_selector('#panel-setup:not(.hidden)')
+        start(page)
+        page.goto(url + '?done=1'); page.wait_for_selector('#dlg-finish[open]')
+        check('finish: calendar link (?done=1) opens the prompt, then drops the param', page.is_checked('#fin-now') and '?done' not in page.url, page.url)
+        page.click('#dlg-finish button[value=failed]')
+        page.wait_for_selector('#panel-done:not(.hidden)')
+        n = page.evaluate("JSON.parse(localStorage.getItem('printsim.calib.prusa-mini')).n")
+        check('finish: "It failed" ends it without touching calibration', 'failed' in page.inner_text('#done-text') and n == 1, f'n={n}')
+        check('finish flow: no JS errors', not errors, '; '.join(errors)[:300])
         ctx.close()
 
         # ---- support check + laptop layout ----

@@ -5,6 +5,7 @@ import { PRINTERS, AMBIENT, guessPrinter } from './printers.js';
 import { MATERIALS, surfaceFor } from './materials.js';
 import { idbGet, idbSet, idbDel, lsGet, lsSet, getCalibration, addCalibration } from './store.js';
 import { planEvents, buildIcs, googleCalendarUrl } from './ics.js';
+import { clockToWall, wallToClock, expectedEndWall, measureRun } from './finish.js';
 import { spaghettiReport, fmtGrams } from './report.js';
 import { TimelapseRecorder, recordingType } from './recorder.js';
 
@@ -623,20 +624,20 @@ function checkAutoPause(t) {
   }
 }
 
-function printerFinished() {
-  const t = now();
-  endPause(t);
-  let actualMotion;
-  if (run.extrudeWall) actualMotion = (t - run.extrudeWall - (run.pausedMs - run.pausedAtExtrude)) / 1000;
-  else actualMotion = (t - run.startedWall - run.pausedMs) / 1000 - tl.startupEnd;
+// finishWall: when the printer really finished (the finish dialog asks; it can
+// be well before now if the user checked back late)
+function printerFinished(finishWall = now()) {
+  const { total: actualTotal, motion: actualMotion } = measureRun(run, finishWall, tl.startupEnd);
+  endPause(now());
   const predictedMotion = tl.total - tl.startupEnd;
   const ratio = actualMotion / Math.max(predictedMotion, 1);
-  const actualTotal = (t - run.startedWall - run.pausedMs) / 1000;
   const printer = PRINTERS[setup.printerId];
   let text = `Took ${fmtDur(actualTotal)} (sim predicted ${fmtDur(tl.total)}).`;
   if (ratio > 0.6 && ratio < 1.6 && predictedMotion > 120) {
     const cal = addCalibration(printer.id, run.factor * ratio);
-    text += ` Future estimates for the ${printer.name} are now calibrated from ${cal.n} print${cal.n > 1 ? 's' : ''} (×${cal.factor.toFixed(2)}).`;
+    const off = Math.round((ratio - 1) * 100);
+    const how = Math.abs(off) < 1 ? 'right on time' : `${Math.abs(off)}% ${off > 0 ? 'slower' : 'faster'} than predicted`;
+    text += ` This one ran ${how}. Future estimates for the ${printer.name} are now calibrated from ${cal.n} print${cal.n > 1 ? 's' : ''} (×${cal.factor.toFixed(2)}).`;
   } else {
     text += ' That was too far off to learn from (forgot to hit start on time?), so calibration was left alone.';
   }
@@ -648,6 +649,56 @@ function printerFinished() {
 }
 
 function renderDone(text) { $('done-text').textContent = text || ''; }
+
+// ---------------------------------------------------------------- "when did it finish?"
+// Calibration only learns if people report the finish, and report it right.
+// So: the ETA banner, the calendar's finish alert (?done=1), "End print" near
+// the end, and coming back after the ETA all lead here.
+function openFinishDialog() {
+  if (!run || !tl || mode !== 'run') return;
+  const d = $('dlg-finish');
+  if (d.open) return;
+  const t = now();
+  const exp = expectedEndWall(run, tl.total);
+  const late = exp != null && t - exp > 10 * 60e3;
+  $('fin-time').value = wallToClock(late ? exp : t);
+  $(late ? 'fin-at' : 'fin-now').checked = true;
+  $('fin-note').textContent = exp == null
+    ? ''
+    : exp <= t ? `printsim expected it around ${clock(exp)}.` : `printsim expects it around ${clock(exp)}.`;
+  d.returnValue = '';
+  d.onclose = () => {
+    const v = d.returnValue;
+    if (v === 'failed') return printFailed();
+    if (v !== 'ok') { run.askedFor = exp != null ? Math.round(exp) : run.askedFor; saveSession(); lastUi = 0; return; }
+    let at = now();
+    if ($('fin-at').checked) {
+      at = clockToWall($('fin-time').value, now(), run.startedWall);
+      if (at == null) { toast("That's before the print started. Pick the time it finished."); setTimeout(openFinishDialog, 50); return; }
+    }
+    printerFinished(at);
+  };
+  d.showModal();
+}
+
+function printFailed() {
+  run.running = false;
+  run.anchorSim = Math.min(simNow(), tl.total);
+  const text = 'Marked as failed. Calibration was left alone, since a failed print says nothing about how fast the printer is.';
+  renderDone(text);
+  setMode('done');
+  idbSet('session', { mode: 'done', setup, run, doneText: text });
+}
+
+// Came back after the print should have ended and never said so: ask, once per ETA
+function maybeAskFinish() {
+  if (mode !== 'run' || !run || !tl) return;
+  const exp = expectedEndWall(run, tl.total);
+  if (exp == null || now() - exp < 5 * 60e3 || run.askedFor === Math.round(exp)) return;
+  run.askedFor = Math.round(exp);
+  saveSession();
+  openFinishDialog();
+}
 
 // ---------------------------------------------------------------- run UI
 function updateRunUI(t) {
@@ -713,7 +764,8 @@ function updateRunUI(t) {
   if (!run.running && run.pauseReason === 'filament') html = '<b>Filament change</b>Swap the filament, then tap Resume the moment the printer carries on.';
   else if (!run.running && run.pauseReason === 'pause') html = '<b>The file pauses here</b>Tap Resume when the printer continues.';
   else if (!run.running) html = '<b>Paused</b>Tap Resume when the printer is going again.';
-  else if (ended && !run.overtime) html = '<b>Should be done about now</b><span class="banner-actions"><button class="btn primary" data-act="finished" type="button">Yep, it\'s done</button><button class="btn" data-act="overtime" type="button">Still going</button></span>';
+  else if (ended && !run.overtime) html = '<b>Should be done about now</b><span class="banner-actions"><button class="btn primary" data-act="finished" type="button">It finished</button><button class="btn" data-act="overtime" type="button">Still going</button></span>';
+  else if (ended) html = '<b>Running over</b>Tap when it\'s done so printsim learns how fast this printer really is.<span class="banner-actions"><button class="btn primary" data-act="finished" type="button">It finished</button></span>';
   if (banner.dataset.html !== html) {
     banner.innerHTML = html;
     banner.dataset.html = html;
@@ -821,6 +873,7 @@ function calendarEvents() {
   return planEvents({
     nowMs: t, simNow: simNow(t), total: tl.total, pauses: tl.pauses,
     name: file.name, printer: printer ? printer.name : '', url: location.origin + location.pathname,
+    finishUrl: `${location.origin}${location.pathname}?done=1`,
   });
 }
 
@@ -1140,11 +1193,13 @@ function wire() {
     $('btn-more').setAttribute('aria-expanded', open);
     $('btn-more').setAttribute('aria-label', open ? 'Fewer options' : 'More options');
   };
-  $('btn-finished').onclick = printerFinished;
+  $('btn-finished').onclick = openFinishDialog;
+  for (const ev of ['input', 'focus']) $('fin-time').addEventListener(ev, () => { $('fin-at').checked = true; });
   $('btn-cal').onclick = openCalendar;
   $('cal-ics').onclick = downloadIcs;
   $('cal-google').addEventListener('click', () => setTimeout(() => $('dlg-cal').close(), 100));
   $('btn-stop').onclick = async () => {
+    if (run && tl && simNow() >= 0.9 * tl.total) { openFinishDialog(); return; } // most likely it finished
     if (await confirmBox('End this print?', 'The sim stops and you go back to setup. The file stays loaded.', 'End print')) {
       run = null;
       setWake(false); $('wake').checked = false;
@@ -1155,8 +1210,8 @@ function wire() {
   };
   $('banner').addEventListener('click', (e) => {
     const act = e.target.closest('[data-act]')?.dataset.act;
-    if (act === 'finished') printerFinished();
-    if (act === 'overtime') { run.overtime = true; saveSession(); lastUi = 0; }
+    if (act === 'finished') openFinishDialog();
+    if (act === 'overtime') { run.overtime = true; const e = expectedEndWall(run, tl.total); if (e != null) run.askedFor = Math.round(e); saveSession(); lastUi = 0; }
   });
   $('wake').onchange = (e) => setWake(e.target.checked);
   document.addEventListener('visibilitychange', () => {
@@ -1165,6 +1220,7 @@ function wire() {
     if (document.visibilityState === 'visible') {
       lastUi = 0;
       if ($('wake').checked) setWake(true);
+      maybeAskFinish();
     }
   });
 
@@ -1266,6 +1322,13 @@ async function init() {
     const session = await idbGet('session');
     await openFile(saved.name, saved.bytes instanceof Uint8Array ? saved.bytes : new Uint8Array(saved.bytes), session || { setup: null });
   }
+  // opened from the calendar's "Print done" alert
+  const q = new URLSearchParams(location.search);
+  if (q.has('done')) {
+    history.replaceState(null, '', location.pathname + location.hash);
+    if (mode === 'run') openFinishDialog();
+    else if (mode !== 'done') toast('No print is running here. Started it from your home-screen app? Open printsim there.', 5000);
+  } else maybeAskFinish();
 
   if ('serviceWorker' in navigator && location.protocol === 'https:') {
     navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -1276,7 +1339,7 @@ async function init() {
 // __printsim.recSeconds = 2 makes "Save as video" record a 2 s timelapse (tests).
 window.__printsim = {
   recSeconds: 0,
-  skip(sec) { if (run) { run.anchorWall -= sec * 1000; if (run.startedWall) run.startedWall -= sec * 1000; if (run.extrudeWall) run.extrudeWall -= sec * 1000; lastUi = 0; } },
+  skip(sec) { if (run) { run.anchorWall -= sec * 1000; if (run.startedWall) run.startedWall -= sec * 1000; if (run.extrudeWall) run.extrudeWall -= sec * 1000; lastUi = 0; saveSession(); } },
   get timeline() { return tl; },
   get run() { return run; },
   get recording() { return !!rec; },

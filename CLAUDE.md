@@ -24,7 +24,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 
 - No build step: plain ES modules, three.js r170 vendored in `vendor/`, import map in `index.html`. Keep it that way.
 - Everything runs in the browser. User files never leave the device.
-- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v16`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
+- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v17`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
 - File-derived text (file names, config values) goes in via `textContent`, never `innerHTML`.
 - The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops (reshaped in place each frame, never flatter than a 30 mm lift), 190x200 sheet, spool on a stand behind in the filament colour. Static parts merged per material (~44 draw calls).
 - Timelapse speeds are 10x / 50x / 200x / 1000x + layer by layer (2x to 8x was rejected as useless).
@@ -50,6 +50,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 | `js/store.js` | IndexedDB (file + session) and localStorage (prefs, calibration, `printsim.ghostHint`) |
 | `js/report.js` | Spaghetti report: when it fails (time + layer + %), grams at stake (net E from `moves.e`, matches PrusaSlicer within 0.4%), why no supports (off, or on but paint-only) |
 | `js/ics.js` | "Remind me": `.ics` with alarms for the finish and filament swaps + Google Calendar link; iOS gets a `data:text/calendar` URL; fresh UIDs per export |
+| `js/finish.js` | "When did it finish?": `clockToWall` (time input -> wall, past midnight, before start = null), `expectedEndWall`, `measureRun` (pauses count only up to the finish). The prompt opens from the ETA banner, `?done=1` (calendar finish alert), "End print" past 90%, and on return >5 min after the ETA (once per ETA, `run.askedFor`) |
 | `js/recorder.js` | "Save as video": ~12 s timelapse via MediaRecorder (MP4 where possible, else WebM), copied from WebGL in `renderer.onRendered`; Web Share or save |
 | `css/style.css` | Bottom sheet on phones; side card at >=900px and on landscape phones (max-height 520px) |
 

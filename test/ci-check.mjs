@@ -244,5 +244,28 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   check('resync by time left: no R marks -> null (falls back to %)', timeForRemaining(noR, 10) === null);
 }
 
+// ---- "when did it finish?" (js/finish.js) ----
+{
+  const { clockToWall, wallToClock, expectedEndWall, measureRun } = await import('../js/finish.js');
+  const at = (y, mo, d, h, mi) => new Date(y, mo, d, h, mi).getTime();
+  const nowMs = at(2026, 9, 5, 1, 30), start = at(2026, 9, 4, 18, 0);
+  check('finish clock: earlier today', clockToWall('00:45', nowMs, start) === at(2026, 9, 5, 0, 45));
+  check('finish clock: later than now means yesterday (ran past midnight)', clockToWall('23:10', nowMs, start) === at(2026, 9, 4, 23, 10));
+  check('finish clock: before the print started -> null', clockToWall('17:00', nowMs, start) === null);
+  check('finish clock: garbage -> null', clockToWall('', nowMs, start) === null && clockToWall('25:00', nowMs, start) === null);
+  check('finish clock round-trips', clockToWall(wallToClock(at(2026, 9, 5, 0, 7)), nowMs, start) === at(2026, 9, 5, 0, 7));
+  const run = { running: true, anchorWall: start, anchorSim: 0, startedWall: start, pausedMs: 0, pauseStartWall: null, extrudeWall: start + 300e3, pausedAtExtrude: 0 };
+  check('expected end = start + sim total', expectedEndWall(run, 3600) === start + 3600e3);
+  check('expected end unknown while paused', expectedEndWall({ ...run, running: false }, 3600) === null);
+  // checked back 3 h late but said when it really finished: measured from that, not from now
+  const m = measureRun(run, start + 3600e3, 300);
+  check('measure: from the stated finish, motion from first extrusion', m.total === 3600 && m.motion === 3300, JSON.stringify(m));
+  const p = measureRun({ ...run, running: false, pauseStartWall: start + 3000e3 }, start + 3600e3, 300);
+  check('measure: an open pause counts only up to the finish', p.total === 3000 && p.motion === 2700, JSON.stringify(p));
+  const { planEvents } = await import('../js/ics.js');
+  const ev = planEvents({ nowMs, simNow: 0, total: 600, name: 'a.gcode', url: 'https://x/p/', finishUrl: 'https://x/p/?done=1' });
+  check('calendar finish alert links to the finish prompt', ev[0].description.includes('https://x/p/?done=1'));
+}
+
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');
 process.exit(failures ? 1 : 0);

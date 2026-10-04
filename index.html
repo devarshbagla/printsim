@@ -174,8 +174,8 @@
       <div class="hero">
         <div class="pct"><span id="pct">0</span><small>%</small></div>
         <div class="hero-right">
-          <div id="remain" class="remain">—</div>
-          <div id="eta" class="muted small">—</div>
+          <div id="remain" class="remain">-</div>
+          <div id="eta" class="muted small">-</div>
           <button id="btn-cal" class="pill cal-pill" type="button">
             <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
             Remind me
@@ -184,9 +184,9 @@
       </div>
       <div class="progress" aria-hidden="true"><i id="bar"></i></div>
       <div class="stats">
-        <div><span class="k">Layer</span><span id="st-layer" class="v">—</span></div>
-        <div><span class="k">Height</span><span id="st-z" class="v">—</span></div>
-        <div class="wide"><span class="k">Now</span><span id="st-phase" class="v">—</span></div>
+        <div><span class="k">Layer</span><span id="st-layer" class="v">-</span></div>
+        <div><span class="k">Height</span><span id="st-z" class="v">-</span></div>
+        <div class="wide"><span class="k">Now</span><span id="st-phase" class="v">-</span></div>
       </div>
       <div class="actions">
         <button id="btn-extruding" class="btn primary" type="button">It's extruding now</button>
@@ -238,6 +238,23 @@
         <button value="cancel" class="btn" type="submit" formnovalidate>Cancel</button>
         <button value="ok" class="btn primary" type="submit">Sync</button>
       </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-finish">
+    <form method="dialog">
+      <h3>When did it finish?</h3>
+      <p class="muted small">This is how printsim learns how fast this printer really is. Rough is fine.</p>
+      <div class="finish-opts" role="radiogroup" aria-label="When it finished">
+        <label class="finish-opt"><input type="radio" name="fin" id="fin-now" value="now"><span>Just now</span></label>
+        <label class="finish-opt"><input type="radio" name="fin" id="fin-at" value="at"><span>Earlier, at</span><input type="time" id="fin-time" aria-label="Finish time"></label>
+      </div>
+      <p id="fin-note" class="hint"></p>
+      <div class="actions">
+        <button value="failed" class="btn" type="submit" formnovalidate>It failed</button>
+        <button value="ok" class="btn primary" type="submit">Save</button>
+      </div>
+      <button value="cancel" class="linkbtn fin-later" type="submit" formnovalidate>Still printing</button>
     </form>
   </dialog>
 
