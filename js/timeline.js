@@ -10,6 +10,23 @@
 import { Ev } from './gcode.js';
 import { AMBIENT, probeRun } from './printers.js';
 
+// Words the MINI screen uses during the prelude. One place, so a lab photo
+// that disagrees (the probe counter especially) is a one-line change.
+// Probe "Probing" + "n/N" is the owner's best guess from "1/16, 4/16".
+export const MINI_STATUS = {
+  hotend: 'Waiting for hotend',
+  bed: 'Waiting for bed',
+  homing: 'Homing',
+  probing: 'Probing',
+  temp(cur, target) { return `${Math.round(cur)}/${Math.round(target)} °C`; },
+  count(n, total) { return `${n}/${total}`; },
+};
+
+// Nozzle height while travelling between probe points, and how far it dips
+// at the point. Small on purpose: the mesh replay is about XY, not a Z cam.
+const PROBE_CLEAR = 2;
+const PROBE_DIP = 1.6;
+
 function heatTime(T, target, h) {
   // seconds to heat from T to target with first-order model
   if (target <= T) return 0;
@@ -102,13 +119,19 @@ export function buildTimeline(parsed, printer, opts = {}) {
   const hn = printer.nozzle, hb = printer.bedHeat;
   const pauses = []; // sim times where the clock auto-pauses
   const probeState = { probed: new Set(), pos: null };
-  const phases = []; // {move, label, target}
+  const probeByMove = new Map(); // G29 move -> {schedule, from, dwell, accel, xySpeed}
+  const phases = []; // {move, kind, label}
+  const thermals = []; // {t, Tn, Tb, tgtN, tgtB} at temperature events and wait edges
+  const startNozzle = Tn, startBed = Tb;
+  let homeDoneAt = null; // sim time the first G28 finishes (null if the file never homes)
   let t = 0;
   let pending = 0; // motion time since last thermal update
 
   const thermalCatchUp = () => {
     if (pending > 0) { Tn = advance(Tn, tgtN, pending, hn); Tb = advance(Tb, tgtB, pending, hb); pending = 0; }
   };
+  const pushThermal = (at) => { thermals.push({ t: at, Tn, Tb, tgtN, tgtB }); };
+  pushThermal(0);
 
   for (let k = 0; k < M; k++) {
     let d = 0;
@@ -118,36 +141,47 @@ export function buildTimeline(parsed, printer, opts = {}) {
     } else {
       const ev = event[k], p = param[k];
       switch (ev) {
-        case Ev.SetNozzle: thermalCatchUp(); tgtN = p > 0 ? p : AMBIENT; break;
-        case Ev.SetBed: thermalCatchUp(); tgtB = p > 0 ? p : AMBIENT; break;
+        case Ev.SetNozzle: thermalCatchUp(); tgtN = p > 0 ? p : AMBIENT; pushThermal(t); break;
+        case Ev.SetBed: thermalCatchUp(); tgtB = p > 0 ? p : AMBIENT; pushThermal(t); break;
         case Ev.WaitNozzle: case Ev.WaitNozzleAny: {
           thermalCatchUp();
           if (p > 0) tgtN = p;
+          pushThermal(t);
           d = heatTime(Tn, tgtN, hn);
           if (ev === Ev.WaitNozzleAny) d = Math.max(d, coolTime(Tn, tgtN, hn));
           if (d > 0) d += hn.settle;
           Tb = advance(Tb, tgtB, d, hb);
           Tn = tgtN;
-          phases.push({ move: k, label: `Heating nozzle to ${Math.round(tgtN)}°C` });
+          pushThermal(t + d);
+          if (d > 0) phases.push({ move: k, kind: 'hotend', label: MINI_STATUS.hotend });
           break;
         }
         case Ev.WaitBed: case Ev.WaitBedAny: {
           thermalCatchUp();
           if (p > 0) tgtB = p;
+          pushThermal(t);
           d = heatTime(Tb, tgtB, hb);
           if (ev === Ev.WaitBedAny) d = Math.max(d, coolTime(Tb, tgtB, hb));
           if (d > 0) d += hb.settle;
           Tn = advance(Tn, tgtN, d, hn);
           Tb = tgtB;
-          phases.push({ move: k, label: `Heating bed to ${Math.round(tgtB)}°C` });
+          pushThermal(t + d);
+          if (d > 0) phases.push({ move: k, kind: 'bed', label: MINI_STATUS.bed });
           break;
         }
-        case Ev.Home: d = printer.homeSeconds; pending += d; phases.push({ move: k, label: 'Homing axes' }); break;
+        case Ev.Home:
+          d = printer.homeSeconds;
+          pending += d;
+          if (homeDoneAt == null) homeDoneAt = t + d;
+          if (d > 0) phases.push({ move: k, kind: 'homing', label: MINI_STATUS.homing });
+          break;
         case Ev.ProbeFull: case Ev.ProbeArea: case Ev.ProbeSmall: {
           const rec = parsed.probes ? parsed.probes[p] : null;
-          d = probeRun(printer, rec, probeState).seconds;
+          const run = probeRun(printer, rec, probeState);
+          d = run.seconds;
           pending += d;
-          phases.push({ move: k, label: ev === Ev.ProbeSmall ? 'Probing near purge line' : 'Mesh bed leveling' });
+          probeByMove.set(k, { schedule: run.schedule, from: run.from, dwell: run.dwell, accel: run.accel, xySpeed: run.xySpeed });
+          if (d > 0) phases.push({ move: k, kind: 'probe', label: MINI_STATUS.probing });
           break;
         }
         case Ev.Dwell: d = p; pending += d; break; // real time, not scaled
@@ -189,7 +223,7 @@ export function buildTimeline(parsed, printer, opts = {}) {
   return {
     tEnd, dur, total: t, startupEnd, pauses, phases, phaseByMove, pAnchors, rAnchors,
     slicerTotal, motionTotal: t - startupEnd, factor, calFactor: opts.factor || 1, stealth, speedPct,
-    tStart,
+    tStart, thermals, heaters: { nozzle: hn, bed: hb }, startNozzle, startBed, probeByMove, homeDoneAt,
   };
 }
 
@@ -267,22 +301,140 @@ export function stateAt(parsed, tl, t) {
   if (tc < tl.startupEnd) percent = pa.length ? pa[0].p : 0; // printer sits at 0% while warming up
   if (tc >= tl.total) percent = 100;
 
-  // phase label (only during warm-up / prep)
-  let phase = null;
+  // prelude status: only while a wait, home or probe is actually running.
+  // Travel to the intro line (and anything else) has no status text.
+  let prep = null;
   const startup = tc < tl.startupEnd;
-  if (startup) {
-    if (parsed.moves.kind[k] === 3 && d > 0) phase = tl.phaseByMove.get(k) || 'Preparing';
-    else {
-      let last = null;
-      for (const p of tl.phases) { if (p.move < k) last = p; else break; }
-      phase = last && /level|Prob/.test(last.label) ? 'Moving to purge line' : 'Preparing';
+  if (startup && kind === 3 && d > 0) {
+    const ev = parsed.moves.event[k];
+    if (ev === Ev.WaitNozzle || ev === Ev.WaitNozzleAny) {
+      const tmp = tempsAt(tl, tc);
+      prep = { kind: 'hotend', line1: MINI_STATUS.hotend, line2: MINI_STATUS.temp(tmp.nozzle, tmp.nozzleTarget) };
+    } else if (ev === Ev.WaitBed || ev === Ev.WaitBedAny) {
+      const tmp = tempsAt(tl, tc);
+      prep = { kind: 'bed', line1: MINI_STATUS.bed, line2: MINI_STATUS.temp(tmp.bed, tmp.bedTarget) };
+    } else if (ev === Ev.Home) {
+      prep = { kind: 'homing', line1: MINI_STATUS.homing, line2: '' };
+    } else if (ev === Ev.ProbeFull || ev === Ev.ProbeArea || ev === Ev.ProbeSmall) {
+      const info = tl.probeByMove && tl.probeByMove.get(k);
+      const pose = info && probePose(info, tc - ts);
+      if (pose) {
+        head[0] = pose.x; head[1] = pose.y; head[2] = pose.z;
+        prep = { kind: 'probe', line1: MINI_STATUS.probing, line2: MINI_STATUS.count(pose.n, pose.N) };
+      }
     }
   }
+  const phase = prep ? (prep.line2 ? `${prep.line1} ${prep.line2}` : prep.line1) : null;
+  // real MINI keeps Z at the parked height until the first home finishes
+  const homed = tl.homeDoneAt == null || tc >= tl.homeDoneAt - 1e-9;
 
   return {
     t: tc, move: k, frac, head, segHead, layer, layerCount: parsed.layers.z.length,
-    z: head[2], feature, percent, startup, phase, extruding: kind === 1,
+    z: head[2], feature, percent, startup, phase, prep, homed, extruding: kind === 1,
   };
+}
+
+function hopTime(dist, a, v) {
+  if (!(dist > 0)) return 0;
+  return dist > (v * v) / a ? dist / v + v / a : 2 * Math.sqrt(dist / a);
+}
+
+/** Where the nozzle is during one G29, and which point (1-based) it's on. */
+function probePose(info, localT) {
+  const sch = info.schedule;
+  const N = sch.length;
+  if (!N) return null;
+  const end = sch[N - 1].t1;
+  const t = Math.min(Math.max(0, localT), end);
+  let idx = N - 1;
+  for (let i = 0; i < N; i++) {
+    if (t < sch[i].t1 || i === N - 1) { idx = i; break; }
+  }
+  const pt = sch[idx];
+  const prev = idx === 0 ? info.from : [sch[idx - 1].x, sch[idx - 1].y];
+  const travel = hopTime(Math.hypot(pt.x - prev[0], pt.y - prev[1]), info.accel, info.xySpeed);
+  const lead = Math.max(0, pt.t1 - pt.t0 - travel - info.dwell);
+  const depart = pt.t0 + lead;
+  const arrive = depart + travel;
+  let x, y, z;
+  if (t < depart) {
+    x = prev[0]; y = prev[1]; z = PROBE_CLEAR;
+  } else if (t < arrive) {
+    const f = travel > 1e-9 ? (t - depart) / travel : 1;
+    const u = Math.min(1, Math.max(0, f));
+    x = prev[0] + (pt.x - prev[0]) * u;
+    y = prev[1] + (pt.y - prev[1]) * u;
+    z = PROBE_CLEAR;
+  } else {
+    x = pt.x; y = pt.y;
+    const u = info.dwell > 1e-9 ? (t - arrive) / info.dwell : 1;
+    z = PROBE_CLEAR - PROBE_DIP * Math.sin(Math.min(1, Math.max(0, u)) * Math.PI);
+  }
+  return { x, y, z, n: idx + 1, N };
+}
+
+/**
+ * Nozzle and bed temperatures at sim time t.
+ * Before the job (t < 0): the temps the user typed, held there.
+ * Otherwise: last thermal keyframe at or before t, then both heaters keep
+ * moving for the time since (so one wait doesn't freeze the other heater).
+ */
+export function tempsAt(tl, t) {
+  if (!(t >= 0)) {
+    return {
+      nozzle: tl.startNozzle, nozzleTarget: tl.startNozzle,
+      bed: tl.startBed, bedTarget: tl.startBed,
+    };
+  }
+  const th = tl.thermals;
+  if (!th || !th.length) {
+    return {
+      nozzle: tl.startNozzle, nozzleTarget: tl.startNozzle,
+      bed: tl.startBed, bedTarget: tl.startBed,
+    };
+  }
+  let lo = 0, hi = th.length - 1, i = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (th[mid].t <= t) { i = mid; lo = mid + 1; } else hi = mid - 1;
+  }
+  const kf = th[i];
+  const dt = t - kf.t;
+  return {
+    nozzle: advance(kf.Tn, kf.tgtN, dt, tl.heaters.nozzle),
+    nozzleTarget: kf.tgtN,
+    bed: advance(kf.Tb, kf.tgtB, dt, tl.heaters.bed),
+    bedTarget: kf.tgtB,
+  };
+}
+
+/**
+ * "Time left" the MINI would show, in minutes.
+ * Interpolated from the M73 R table (rAnchors), scaled the same way
+ * timeForRemaining undoes the speed % (shown = file R * 100 / speed%).
+ * Before the first anchor (the whole prelude) this is the first R.
+ * Files with no R marks fall back to (total - t) / 60.
+ * Monotonic non-increasing.
+ */
+export function remainingAt(tl, t) {
+  const ra = tl.rAnchors;
+  const tc = Number.isFinite(t) ? t : 0;
+  if (!ra || ra.length < 2) return Math.max(0, (tl.total - Math.max(0, tc)) / 60);
+  const scale = 100 / (tl.speedPct || 100);
+  const shown = (fileMin) => Math.max(0, fileMin) * scale;
+  if (tc <= ra[0].t) return shown(ra[0].r);
+  for (let i = 1; i < ra.length; i++) {
+    const a = ra[i - 1], b = ra[i];
+    if (tc <= b.t) {
+      const f = b.t > a.t ? (tc - a.t) / (b.t - a.t) : 1;
+      return shown(a.r + (b.r - a.r) * Math.min(1, Math.max(0, f)));
+    }
+  }
+  const last = ra[ra.length - 1];
+  if (!(tl.total > last.t)) return shown(last.r);
+  if (tc >= tl.total) return 0;
+  const f = (tc - last.t) / (tl.total - last.t);
+  return shown(last.r * (1 - Math.min(1, Math.max(0, f))));
 }
 
 /**

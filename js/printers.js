@@ -48,7 +48,10 @@ export const PRINTERS = {
       grid: [6, 6], border: 1, min: [-41, -48], max: [195, 226], samples: 2,
       offset: [-29, -3], edge: 5, axisMin: [-2, -3], axisMax: [180, 180],
       xySpeed: 5000 / 60, accel: 1250, zFast: 6, zSlow: 2, clearance: 1, multiClearance: 0.5,
-      startClearance: 5, overhead: 0.15, start: [147.4, 21.1],
+      // overhead: per-point settle. 0.45 s is an empirical correction from one
+      // lab observation (2 Oct 2026, Brandeis), not a firmware number. It
+      // includes the owner's tap latency. See docs/VERIFICATION.md.
+      startClearance: 5, overhead: 0.45, start: [147.4, 21.1],
     },
   },
   generic: {
@@ -81,7 +84,11 @@ export function hwLimitsFor(model, stealth = false) {
  * Replay of the firmware's mesh probing for one G29 command.
  * rec: { rect: {x0,y0,x1,y1} | null (whole bed), extend: bool, accel }
  * state: { probed: Set, pos: [x,y] }  (carried across G29 calls)
- * Returns { seconds, points }.
+ * Returns { seconds, points, schedule, from, dwell, accel, xySpeed }.
+ * schedule[i] is {x, y, t0, t1}: nozzle position over point i, seconds from
+ * the start of this G29. The slots partition [0, seconds], so the sum of
+ * (t1 - t0) equals seconds exactly. Travel to the point, then the probe
+ * dwell, sit inside the slot (dwell is the tail, length `dwell`).
  */
 export function probeRun(printer, rec, state) {
   const pr = printer.probe;
@@ -106,17 +113,35 @@ export function probeRun(printer, rec, state) {
       pts.push([px - pr.offset[0], py - pr.offset[1]]); // nozzle position over the point
     }
   }
-  if (!pts.length) return { seconds: 0, points: 0 };
   const a = (rec && rec.accel) || pr.accel, v = pr.xySpeed;
+  const from = state.pos ? [state.pos[0], state.pos[1]] : [pr.start[0], pr.start[1]];
+  if (!pts.length) return { seconds: 0, points: 0, schedule: [], from, dwell: 0, accel: a, xySpeed: v };
   const hop = (d) => (d > v * v / a ? d / v + v / a : 2 * Math.sqrt(d / a));
-  let t = pr.startClearance / pr.zFast;
-  let cur = state.pos || pr.start;
-  for (const p of pts) { t += hop(Math.hypot(p[0] - cur[0], p[1] - cur[1])); cur = p; }
+  const hops = [];
+  let cur = from;
+  let hopSum = 0;
+  for (const p of pts) {
+    const h = hop(Math.hypot(p[0] - cur[0], p[1] - cur[1]));
+    hops.push(h);
+    hopSum += h;
+    cur = p;
+  }
   state.pos = cur;
   const zPer = pr.clearance / pr.zFast + (pr.clearance + 0.2) / pr.zFast
     + (pr.samples - 1) * (pr.multiClearance / pr.zFast + (pr.multiClearance + 0.05) / pr.zSlow);
-  t += pts.length * (zPer + pr.overhead);
-  return { seconds: t, points: pts.length };
+  const dwell = zPer + pr.overhead;
+  const startZ = pr.startClearance / pr.zFast;
+  // same terms as the previous single sum, so seconds does not drift
+  const seconds = startZ + hopSum + pts.length * dwell;
+  const schedule = [];
+  let acc = 0;
+  for (let i = 0; i < pts.length; i++) {
+    const t0 = acc;
+    acc += (i === 0 ? startZ : 0) + hops[i] + dwell;
+    schedule.push({ x: pts[i][0], y: pts[i][1], t0, t1: acc });
+  }
+  schedule[schedule.length - 1].t1 = seconds;
+  return { seconds, points: pts.length, schedule, from, dwell, accel: a, xySpeed: v };
 }
 
 export const AMBIENT = 22;

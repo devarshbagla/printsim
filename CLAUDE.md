@@ -24,7 +24,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 
 - No build step: plain ES modules, three.js r170 vendored in `vendor/`, import map in `index.html`. Keep it that way.
 - Everything runs in the browser. User files never leave the device.
-- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v19`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
+- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v20`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
 - File-derived text (file names, config values) goes in via `textContent`, never `innerHTML`.
 - The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops (reshaped in place each frame, never flatter than a 30 mm lift), 190x200 sheet, spool on a stand behind in the filament colour. Static parts merged per material (~44 draw calls).
 - Timelapse speeds are 10x / 50x / 200x / 1000x + layer by layer (2x to 8x was rejected as useless).
@@ -41,7 +41,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 | `js/bgcode.js` | Prusa .bgcode decoder (Heatshrink, MeatPack, Deflate); byte-identical to libbgcode |
 | `js/gcode.js` | Byte-level parser + Marlin/Buddy classic-jerk planner replica; `Ev` and `Feature` enums |
 | `js/printers.js` | MINI + generic profiles, hardware caps, heater model, exact UBL probe replay (4x4 = 16 points) |
-| `js/timeline.js` | Per-move times anchored to `M73 P` (stealth `Q`), warm-up/homing/probing prelude, `factor = calibration * 100 / speedPct` |
+| `js/timeline.js` | Per-move times anchored to `M73 P` (stealth `Q`), warm-up/homing/probing prelude, `factor = calibration * 100 / speedPct`. `tempsAt` (both heaters), `remainingAt` (`M73 R`, minutes), `MINI_STATUS` (prelude wording) |
 | `js/materials.js` | Filament limits per material, fan normalised to each material's own Prusa default fan; `limitsFor(mat, fan01, temp, cool)` |
 | `js/physics.js` | Support check (`analyzeSupport`), `splitSegments` for falling animation, `simulatePhysics` |
 | `js/renderer.js` | `PrintView`: one instanced strand mesh, `uHead` progress uniform, ghost pass, fall shader, camera fit |
@@ -102,6 +102,7 @@ Cessna kits, YAFIC cube on his Google Drive) are not in the repo; all were 0%. A
 
 Each line is a pushed commit; CI was green and the deploy confirmed for every one.
 
+- **v20** Real MINI prelude. Both heaters keep moving (`tempsAt`). Status words match the printer (`MINI_STATUS`: Waiting for hotend, Waiting for bed, Homing, Probing n/16). The head follows the 16-point mesh. `remainingAt` is the on-screen time left from `M73 R`. Probe overhead 0.15 s to 0.45 s from one lab print (2 Oct 2026), about 4.8 s on a 16-point mesh.
 - **v19 `9330ead`** Calibration per physical printer. "Which one?" picker under Printer (Not sure / named printers / + Add a printer, bin button forgets one). Each named printer learns its own factor; every finish also teaches the model pool, used until a printer has its own print. **Bug fixed**: runs used to save `tl.factor` (calibration x 100/speed%), so at non-100% speed reopening mid-print applied the speed twice and an on-time 50% print saved x1.6 as calibration. Runs now store `calFactor`; `runCal()` converts old sessions.
 - **v18 `89f969e`** (built by Cursor Auto from a prompt Claude wrote, then reviewed by Claude: clean) Filament runout prediction: "Filament left on the spool" field in setup, warning (runs out at time/%/layer, or "cutting it close"), auto-pause at the runout move like an M600 (`type: 'runout'` in `tl.pauses`), calendar event. MINI pauses and unloads on runout (Prusa-Firmware-Buddy issue #1279). Known weak test: "runoutMove(half)" computes its expected value the same way as the code.
 - **v17 `c959059`** "When did it finish?" prompt (Just now / Earlier at [time], prefilled with the expected finish when >10 min late / It failed / Still printing). Opens from the ETA banner, the calendar finish alert (`?done=1`), "End print" past 90%, and on return >5 min after the ETA. Fixed: tapping "done" hours late used to record "now" and poison calibration. Placeholder em dashes in index.html removed. `__printsim.skip()` now saves the session.

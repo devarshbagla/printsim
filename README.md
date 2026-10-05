@@ -21,7 +21,7 @@ It's a simulation, not a camera. If the real print fails, printsim will happily 
 - **Remind me**: adds the finish time and any filament swaps to your calendar with alerts, so your phone buzzes with printsim closed (Apple Calendar / Outlook via `.ics`, Google Calendar via its add-event link).
 - **Realistic timing**
   - Motion time is anchored to the slicer's own `M73` progress markers, so the % on screen matches the % on the printer.
-  - Warm-up is simulated from the temps you type in (nozzle + bed heating, homing, mesh bed leveling).
+  - Warm-up is simulated from the temps you type in. Nozzle and bed heat at the same time, then homing and mesh probing. The "Now" line uses the MINI's own words: Waiting for hotend, Waiting for bed, Homing, Probing 4/16.
   - **"It's extruding now"** button: tap when the purge line starts to cancel out all warm-up guesswork.
   - **Resync**: type the % shown on the printer and the sim jumps to exactly that spot in the file.
   - **Learns your printer**: tap "Printer finished" at the end and future estimates for that printer get calibrated. Name the lab's printers ("Which one?") and each one learns its own speed.

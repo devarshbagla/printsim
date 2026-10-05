@@ -5,8 +5,8 @@
 import { readFileSync } from 'node:fs';
 import { decodeBgcode, isBgcode } from '../js/bgcode.js';
 import { parseGcode, parseDuration } from '../js/gcode.js';
-import { buildTimeline, stateAt, timeForPercent } from '../js/timeline.js';
-import { PRINTERS } from '../js/printers.js';
+import { buildTimeline, stateAt, timeForPercent, tempsAt, remainingAt, MINI_STATUS } from '../js/timeline.js';
+import { PRINTERS, probeRun } from '../js/printers.js';
 import { simulatePhysics } from '../js/physics.js';
 import { detectMaterial, nozzleTemp } from '../js/materials.js';
 
@@ -327,6 +327,65 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   const t50 = buildTimeline(parsed, PRINTERS['prusa-mini'], { factor: 1.1, speedPct: 50 });
   check('timeline: calFactor is the calibration alone, factor includes speed', t50.calFactor === 1.1 && Math.abs(t50.factor - 2.2) < 1e-9, `${t50.calFactor} / ${t50.factor}`);
   delete globalThis.localStorage;
+}
+
+// ---- real MINI prelude (test/fixtures/mini-prelude.gcode) ----
+{
+  const { Ev } = await import('../js/gcode.js');
+  const parsed = parseGcode(readFileSync(`${here}test/fixtures/mini-prelude.gcode`));
+  const printer = PRINTERS['prusa-mini'];
+  check('prelude: MINI probe overhead is 0.45 s (one lab correction)', printer.probe.overhead === 0.45);
+  const mesh = probeRun(printer, null, { probed: new Set(), pos: null });
+  let sum = 0;
+  for (const pt of mesh.schedule) sum += pt.t1 - pt.t0;
+  check('prelude: 16 probe points, schedule sums to seconds', mesh.points === 16 && sum === mesh.seconds, `${mesh.points}, sum ${sum === mesh.seconds}`);
+  const tl = buildTimeline(parsed, printer, { nozzleNow: 22, bedNow: 22 });
+  check('prelude: phase order is hotend, bed, homing, probe, hotend', tl.phases.map(p => p.kind).join(',') === 'hotend,bed,homing,probe,hotend');
+  const cold = tempsAt(tl, -1);
+  check('prelude: before the job, tempsAt returns the setup temps', cold.nozzle === 22 && cold.bed === 22 && cold.nozzleTarget === 22 && cold.bedTarget === 22);
+  const bed = tl.phases.find(p => p.kind === 'bed');
+  const bedT = tempsAt(tl, tl.tStart(bed.move) + 0.2);
+  const bedSt = stateAt(parsed, tl, tl.tStart(bed.move) + 0.2);
+  check('prelude: bed wait shows the nozzle already hot (parallel heaters)', bedT.nozzle > 169 && bedT.bed > 30 && bedT.bed < 59 && bedT.bedTarget === 60, `${bedT.nozzle.toFixed(0)}/${bedT.bed.toFixed(0)}`);
+  check('prelude: bed wording is Waiting for bed with a spaced °C', bedSt.phase === `${MINI_STATUS.bed} ${bedSt.prep.line2}` && /°C$/.test(bedSt.prep.line2) && bedSt.prep.line2.includes(' °C'));
+  const probe = tl.phases.find(p => p.kind === 'probe');
+  const info = tl.probeByMove.get(probe.move);
+  const t0 = tl.tStart(probe.move);
+  let prevN = 0, mono = true;
+  const seen = new Set();
+  for (let i = 0; i <= 200; i++) {
+    const st = stateAt(parsed, tl, t0 + tl.dur[probe.move] * (i / 200) * 0.999);
+    const m = /^Probing (\d+)\/16$/.exec(st.phase || '');
+    if (!m) { mono = false; break; }
+    const n = +m[1];
+    if (n < prevN) mono = false;
+    prevN = n;
+    seen.add(n);
+  }
+  check('prelude: probe counter is 1..16, never decreasing', mono && seen.size === 16 && prevN === 16, `saw ${seen.size}, last ${prevN}`);
+  const pt = info.schedule[3];
+  const at = stateAt(parsed, tl, t0 + pt.t1 - info.dwell * 0.5);
+  check('prelude: head sits on probe point 4', Math.hypot(at.head[0] - pt.x, at.head[1] - pt.y) < 0.2 && at.phase === 'Probing 4/16', at.phase);
+  const after = stateAt(parsed, tl, tl.tEnd[probe.move] + 0.15);
+  check('prelude: travel after probing has no status text', after.startup && after.phase == null);
+  const hot = tl.phases.filter(p => p.kind === 'hotend');
+  const endHot = tempsAt(tl, tl.tEnd[hot[1].move] + 0.05);
+  check('prelude: printing starts at nozzle 230 / bed 60', Math.abs(endHot.nozzle - 230) < 0.5 && endHot.nozzleTarget === 230 && Math.abs(endHot.bedTarget - 60) < 1e-6);
+  let m104 = -1;
+  for (let k = 0; k < parsed.moves.event.length; k++) if (parsed.moves.event[k] === Ev.SetNozzle && parsed.moves.param[k] === 220) m104 = k;
+  const later = tempsAt(tl, tl.tEnd[m104] + 30);
+  check('prelude: a later M104 S220 is the nozzle target', tempsAt(tl, tl.tEnd[m104]).nozzleTarget === 220 && Math.abs(later.nozzle - 220) < 0.5);
+  let prevR = Infinity, rMono = true;
+  for (let i = 0; i <= 200; i++) {
+    const v = remainingAt(tl, (tl.total * i) / 200);
+    if (v > prevR + 1e-6) rMono = false;
+    prevR = v;
+  }
+  check('prelude: remainingAt is the first R before printing, then monotonic', rMono && remainingAt(tl, 0) === 87 && remainingAt(tl, tl.startupEnd - 0.5) === 87);
+  const half = buildTimeline(parsed, printer, { nozzleNow: 22, bedNow: 22, speedPct: 50 });
+  check('prelude: remainingAt doubles at 50% speed', remainingAt(half, 0) === 174);
+  const noR = buildTimeline({ ...parsed, anchors: parsed.anchors.map(a => ({ ...a, r: NaN })) }, printer, {});
+  check('prelude: no R marks falls back to (total - t) / 60', Math.abs(remainingAt(noR, 0) - noR.total / 60) < 1e-6 && remainingAt(noR, noR.total) === 0);
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

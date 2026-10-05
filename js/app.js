@@ -823,7 +823,7 @@ function updateRunUI(t) {
   view.setScreen({
     title: st.startup ? 'preparing' : run.running ? 'printing' : 'paused',
     big: st.startup ? '0%' : `${pct}%`,
-    line1: st.startup ? (st.phase || 'Preparing') : `${fmtDur(Math.max(0, tl.total - s))} left`,
+    line1: st.startup ? (st.phase || '') : `${fmtDur(Math.max(0, tl.total - s))} left`,
     line2: `Layer ${st.layer + 1}/${st.layerCount}`,
     progress: st.percent / 100, accent: accentHex(),
   });
@@ -852,11 +852,14 @@ function updateRunUI(t) {
   $('st-z').textContent = st.startup ? '-' : `${st.z.toFixed(2)} mm`;
   let now_ = st.phase;
   if (!now_) {
-    now_ = st.feature === Feature.Custom ? 'Purge line' : FeatureNames[st.feature];
-    if (!st.extruding && !ended) now_ = `Travel · ${now_}`;
-    const si = Math.min(Math.floor(st.segHead), parsed.segs.move.length - 1);
-    if (prefs.physics && parsed.segs.drop && (parsed.segs.drop[si * 2] > 0 || parsed.segs.drop[si * 2 + 1] > 0) && !ended) now_ = `${now_} · in mid-air!`;
-    if (ended) now_ = 'Finished';
+    if (st.startup) now_ = '';
+    else {
+      now_ = st.feature === Feature.Custom ? 'Purge line' : FeatureNames[st.feature];
+      if (!st.extruding && !ended) now_ = `Travel · ${now_}`;
+      const si = Math.min(Math.floor(st.segHead), parsed.segs.move.length - 1);
+      if (prefs.physics && parsed.segs.drop && (parsed.segs.drop[si * 2] > 0 || parsed.segs.drop[si * 2 + 1] > 0) && !ended) now_ = `${now_} · in mid-air!`;
+      if (ended) now_ = 'Finished';
+    }
   }
   $('st-phase').textContent = now_;
 

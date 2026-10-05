@@ -16,7 +16,7 @@ Sources:
 | Claim | Was | Now | Source |
 |---|---|---|---|
 | Mesh leveling points | 6×6 = 36 | **4×4 = 16** (`GRID_BORDER 1`: outer ring never probed) | FW `Configuration_MINI.h`, `ubl_G29.cpp`; [Prusa KB: "The grid density is 4x4"](https://help.prusa3d.com/article/mesh-bed-leveling_112163) |
-| Full mesh time | 80 s guess, then 59 s | **~26 s**, exact replay of `probe_major_points` (snake order, reachability, `C` = skip probed) | FW `ubl_G29.cpp` |
+| Full mesh time | 80 s guess, then 59 s, then ~26 s of motion | **~31 s**: the same point-by-point replay (~26.5 s) plus 0.45 s of settle per point | FW `ubl_G29.cpp` for the path; 0.45 s is one lab timing, see Still estimates |
 | Bare `G29` | "full mesh", guessed | runs `G29 P1 X0 Y0` = print area grown by one grid step (whole bed without `M555`) | FW `ubl_G29.cpp` |
 | Cornering: new move's entry speed | scaled to the slower move | **not scaled** (firmware only scales the previous move's exit) | FW `planner.cpp` classic jerk |
 | Cornering: safe-speed override | missing | if both moves' safe speeds exceed the junction limit, use the safe speed | FW `planner.cpp` |
@@ -98,7 +98,10 @@ Also checked and kept: the Z motor sits **on top** of the column under the Z-top
 
 - **Heater warm-up curves**: sized from real wattages plus estimated heat capacities; corrected at runtime by *It's extruding now* and per-printer calibration.
 - **Homing time (~20 s)**: sensorless homing retries (`PRECISE_HOMING_TRIES 15`) and the starting Z height vary.
-- **Per-probe overhead**: probe settle time isn't in the firmware config; 0.15 s assumed.
+- **Per-probe overhead**: 0.45 s per point. It was 0.15 s, a guess, because settle time isn't in the firmware config. Raised after one lab print (2 Oct 2026, Brandeis MakerLab, Prusa MINI+, file `Ghosts_0.4n_0.2mm_PLA_MINIIS_1h27m.bgcode`): printsim reached the intro line about 5 s before the printer finished the 16-point mesh. 0.30 s extra times 16 points is 4.8 s. That correction includes the owner's tap latency when they pressed Start. It is not a firmware number. "It's extruding now" is still how a user cancels warm-up error.
+- **Heater track**: `tempsAt` keeps both heaters moving during the prelude. A keyframe (`t`, nozzle, bed, both targets) is stored at every `M104`/`M140` and at the start and end of every `M109`/`M190`. Between keyframes the existing first-order `advance()` runs, so the nozzle keeps climbing while the bed is the one being waited on. Checked against the 2 Oct photos: during "Waiting for bed" the nozzle was already near its 170 °C target (168/170 on the screen, 170/170 in the model once `M109 R170` has finished). The model is unchanged, so the bed is often already past 32 °C when that wait starts.
+- **Printing time vs remaining time** (2 Oct, 49% of an 87 min file): the screen's "Printing time" 46m 25s counts from job start, warm-up included (49% of 87 min is only ~42.6 min). "Remaining time" 44m matches the file's `M73 R` marks (whole minutes), not `total - t`. `remainingAt` interpolates those anchors and applies the same speed-% scaling `timeForRemaining` already undoes. Before the first anchor it returns that first R. With no R marks it falls back to `(total - t) / 60`.
+- **Probe status text**: the screen line is "Probing" plus `n/16`. The owner saw a counter like 1/16, 4/16 and did not photograph the word. "Probing" is a guess, kept in `MINI_STATUS` so it can change in one place. The head follows the snake path (travel, then a small Z dip on the point) so the bed and the nozzle move during G29.
 - **Falling physics** is a rule-based check, not a rigid-body sim: strands fall straight down with a small seeded curl and pile where they land. Good enough to show *where* and *when* a print fails.
 - **Catch distance (0.8 mm)**: print-in-place clearances of 0.3 to 0.5 mm and support gaps of 0.1 to 0.3 mm print fine in practice; where it stops working is fuzzy.
 - **Material failure limits**: set above published quality limits; no systematic failure data exists. Real failed prints are the way to tune them.

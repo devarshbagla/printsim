@@ -287,14 +287,23 @@ def main():
             page.click('#btn-rec')
             page.wait_for_selector('#dlg-video[open]', timeout=300_000)
             page.wait_for_function("document.getElementById('video-out').readyState >= 2", timeout=60_000)
-            mean = page.evaluate("""() => {
+            # readyState 2 can still hand back a black frame before the decoder
+            # paints. Sample a few times, and nudge playback, before judging.
+            mean_js = """() => {
               const v = document.getElementById('video-out'), c = document.createElement('canvas');
               c.width = v.videoWidth; c.height = v.videoHeight;
               const g = c.getContext('2d'); g.drawImage(v, 0, 0);
               const d = g.getImageData(0, 0, c.width, c.height).data; let s = 0, n = 0;
               for (let i = 0; i < d.length; i += 4 * 61) { s += d[i] + d[i + 1] + d[i + 2]; n++; }
-              return s / n / 3;
-            }""")
+              return n ? s / n / 3 : 0;
+            }"""
+            mean = 0
+            for _ in range(8):
+                mean = page.evaluate(mean_js)
+                if mean > 20:
+                    break
+                page.evaluate("const v = document.getElementById('video-out'); if (v.paused) v.play().catch(() => {})")
+                page.wait_for_timeout(300)
             check('video has real frames (not black)', mean > 20, f'mean brightness {mean:.0f}')
             shot(page, '360x640-video-dialog')
             with page.expect_download() as dl:
@@ -460,6 +469,26 @@ def main():
         check('floating part is called out', 'One part starts printing in mid-air' in warn, warn[:160])
         check('explains supports were on but only where painted', 'only where painted' in warn and 'Turn on automatic supports' in warn, warn[:260])
         check('floating part: no JS errors', not errors, '; '.join(errors)[:300])
+        ctx.close()
+
+        # ---- real MINI prelude: the Now row uses the printer's probe words ----
+        errors = []
+        ctx, page = new_page(browser, url, 390, 844, errors)
+        load_bytes(page, 'mini-prelude.gcode', (ROOT / 'test/fixtures/mini-prelude.gcode').read_bytes())
+        start(page)
+        jump = page.evaluate('''() => {
+          const tl = window.__printsim.timeline;
+          const p = tl.phases.find((x) => x.kind === "probe");
+          const mid = (tl.tStart(p.move) + tl.tEnd[p.move]) / 2;
+          const run = window.__printsim.run;
+          const sim = run.anchorSim + (Date.now() - run.anchorWall) / 1000;
+          return mid - sim;
+        }''')
+        page.evaluate('(sec) => window.__printsim.skip(sec)', jump)
+        page.wait_for_function(r"/Probing \d+\/16/.test(document.getElementById('st-phase').textContent)")
+        phase = page.inner_text('#st-phase')
+        check('prelude Now row shows Probing n/16', re.fullmatch(r'Probing \d+/16', phase) is not None, phase)
+        check('prelude probe: no JS errors', not errors, '; '.join(errors)[:300])
         ctx.close()
 
         browser.close()
