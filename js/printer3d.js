@@ -16,7 +16,8 @@
 //  - 275 mm Bowden tube, a fixed length that loops as the head moves
 //  - 190 x 200 mm spring steel sheet: locating ears at the back, shallow recess
 //    at the front
-//  - the spool on its stand behind the printer, in the filament colour
+//  - the spool on a printed arm clipped to the right of the Z column, axis
+//    along X, in the filament colour (the lab MINI+, not the separate stand)
 //
 // World units are mm, Y up. The print area is centred on the origin with the
 // sheet surface at y = 0; the front of the printer faces +Z. Moving parts:
@@ -32,9 +33,11 @@ const TUBE_LIFT = 30; // mm: the flattest the tube's arc gets (PTFE kinks below 
 
 function mats() {
   return {
-    printed: new THREE.MeshStandardMaterial({ color: 0x33373e, roughness: 0.6, metalness: 0.05 }),
-    printedDark: new THREE.MeshStandardMaterial({ color: 0x24272c, roughness: 0.62, metalness: 0.05 }),
-    anod: new THREE.MeshStandardMaterial({ color: 0x1a1b1f, roughness: 0.4, metalness: 0.6 }),
+    // Graphite printed parts, visibly not the black frame and not orange.
+    printed: new THREE.MeshStandardMaterial({ color: 0x6a6e76, roughness: 0.62, metalness: 0.02 }),
+    printedDark: new THREE.MeshStandardMaterial({ color: 0x4a4e55, roughness: 0.66, metalness: 0.02 }),
+    // Matte black anodising. Low metalness so the room light doesn't wash it blue-grey.
+    anod: new THREE.MeshStandardMaterial({ color: 0x050608, roughness: 0.84, metalness: 0.06 }),
     slot: new THREE.MeshStandardMaterial({ color: 0x050506, roughness: 0.9, metalness: 0.2 }),
     chrome: new THREE.MeshStandardMaterial({ color: 0xe3e6ea, roughness: 0.14, metalness: 1 }),
     alu: new THREE.MeshStandardMaterial({ color: 0xbfc4ca, roughness: 0.36, metalness: 0.9 }),
@@ -42,8 +45,9 @@ function mats() {
     brass: new THREE.MeshStandardMaterial({ color: 0xc9a14a, roughness: 0.28, metalness: 1 }),
     pcb: new THREE.MeshStandardMaterial({ color: 0x1d2024, roughness: 0.7, metalness: 0.2 }),
     rubber: new THREE.MeshStandardMaterial({ color: 0x0e0f11, roughness: 0.92 }),
-    motor: new THREE.MeshStandardMaterial({ color: 0x1b1c1f, roughness: 0.45, metalness: 0.6 }),
-    motorCap: new THREE.MeshStandardMaterial({ color: 0x2b2d31, roughness: 0.35, metalness: 0.8 }),
+    motor: new THREE.MeshStandardMaterial({ color: 0x0c0d10, roughness: 0.78, metalness: 0.08 }),
+    motorCap: new THREE.MeshStandardMaterial({ color: 0x2c3036, roughness: 0.45, metalness: 0.25 }),
+    warn: new THREE.MeshStandardMaterial({ color: 0xf0c010, roughness: 0.5, metalness: 0.04, side: THREE.DoubleSide }),
     belt: new THREE.MeshStandardMaterial({ color: 0x121214, roughness: 0.85 }),
     tube: new THREE.MeshStandardMaterial({ color: 0xf4f4f0, roughness: 0.3, metalness: 0, transparent: true, opacity: 0.82 }),
     fanGlass: new THREE.MeshStandardMaterial({ color: 0x2c3036, roughness: 0.4, metalness: 0.1, transparent: true, opacity: 0.85 }),
@@ -158,6 +162,31 @@ function shadowTexture() {
 }
 
 // filament wound on the spool: faint turns and a slight sheen
+function braidTexture() {
+  const c = document.createElement('canvas');
+  c.width = 64; c.height = 32;
+  const g = c.getContext('2d');
+  g.fillStyle = '#1a1a1a';
+  g.fillRect(0, 0, 64, 32);
+  g.strokeStyle = '#5a5a5a';
+  g.lineWidth = 3;
+  for (let i = -6; i < 14; i++) {
+    g.beginPath();
+    g.moveTo(i * 8, 32);
+    g.lineTo(i * 8 + 28, 0);
+    g.stroke();
+    g.beginPath();
+    g.moveTo(i * 8, 0);
+    g.lineTo(i * 8 + 28, 32);
+    g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(22, 2);
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
 function windingTexture() {
   const c = document.createElement('canvas');
   c.width = 16; c.height = 256;
@@ -233,6 +262,9 @@ class LiveTube {
     g.setAttribute('position', this.aPos);
     g.setAttribute('normal', this.aNor);
     g.setIndex(idx);
+    this.uv = new Float32Array(V * 2);
+    this.aUv = new THREE.BufferAttribute(this.uv, 2).setUsage(THREE.DynamicDrawUsage);
+    g.setAttribute('uv', this.aUv);
     this.mesh = new THREE.Mesh(g, material);
     this.mesh.frustumCulled = false;
     this.mesh.userData.keep = true;
@@ -305,10 +337,13 @@ class LiveTube {
         const o = (i * (m + 1) + j) * 3;
         nor[o] = nx; nor[o + 1] = ny; nor[o + 2] = nz;
         pos[o] = P[i * 3] + nx * R; pos[o + 1] = P[i * 3 + 1] + ny * R; pos[o + 2] = P[i * 3 + 2] + nz * R;
+        const uo = (i * (m + 1) + j) * 2;
+        this.uv[uo] = i / n; this.uv[uo + 1] = j / m;
       }
     }
     this.aPos.needsUpdate = true;
     this.aNor.needsUpdate = true;
+    this.aUv.needsUpdate = true;
   }
 }
 
@@ -599,6 +634,7 @@ export class PrinterModel {
     const zRodF = rz + 20, zRodB = rz - 20, zExt = rz - 41; // row from the Z plate drawing
     const plateTop = table + 40;        // top of the electronics box / Z plate
     const extTop = plateTop + 5 + 289;
+    this.zExt = zExt; this.extTop = extTop; this.colMidY = plateTop + 5 + 144.5;
     const zTopTop = extTop + 13;
     this.colTop = zTopTop + 34;
 
@@ -642,6 +678,14 @@ export class PrinterModel {
     const zm = stepper(34, m, 'y');
     zm.position.set(colX, zTopTop + 17, rz);
     R.add(zm);
+    // two plain yellow triangles near the top of the column (no branding)
+    for (const y of [extTop - 28, extTop - 52]) {
+      const shape = new THREE.Shape();
+      shape.moveTo(-8, 0); shape.lineTo(8, 0); shape.lineTo(0, 14); shape.closePath();
+      const tri = new THREE.Mesh(new THREE.ShapeGeometry(shape), m.warn);
+      tri.position.set(colX, y, zExt + 15.4);
+      R.add(tri);
+    }
 
     // display unit, front right, leaning back, knob under the screen
     const disp = new THREE.Group();
@@ -667,7 +711,7 @@ export class PrinterModel {
       disp.add(wing);
     }
     disp.position.set(colX - 34, table, yHalf + plate - 4);
-    disp.rotation.x = -0.32;
+    disp.rotation.x = -0.48; // about 27 degrees, the lab screen leans back ~25-30
     R.add(disp);
 
     // soft contact shadow
@@ -756,8 +800,9 @@ export class PrinterModel {
     G.add(bb(ex0 + 5, ex0 + 19, 78, 96, rz + 10, rz + 20, m.printedDark, 3));               // idler lever
     const fit = new THREE.Mesh(new THREE.CylinderGeometry(4.2, 4.2, 8, 6), m.brass);
     fit.position.set(ex0 + 12, 98, rz - 6); G.add(fit);
-    this.extruderOut = new THREE.Vector3(ex0 + 12, 102, rz - 6);      // gantry coords
-    this.extruderIn = new THREE.Vector3(ex0 + 12, 70, rz - 26);       // filament goes in at the back
+    // PTFE leaves the top of the extruder and lands high, toward the column
+    this.extruderOut = new THREE.Vector3(ex0 + 8, 120, rz - 16);
+    this.extruderIn = new THREE.Vector3(ex0 + 12, 78, rz - 28);       // filament goes in at the back
 
     // ---------------- print head (moves in X). Origin = nozzle tip.
     const H = this.head;
@@ -788,7 +833,7 @@ export class PrinterModel {
     // PTFE fitting on top
     const hf = new THREE.Mesh(new THREE.CylinderGeometry(4.2, 4.2, 7, 6), m.brass);
     hf.position.set(0, 61.5, 0); H.add(hf);
-    this.headIn = new THREE.Vector3(0, 65, 0);
+    this.headIn = new THREE.Vector3(0, 68, -2);
     // bed probe on the left: 29 mm off the nozzle, like the firmware's probe offset
     H.add(bb(-37, -21, 26, 38, -6, 10, m.printedDark, 3));                                   // probe holder
     H.add(rod('y', 2.2, 34, 4, m.anod, -29, 3, 20));
@@ -813,43 +858,45 @@ export class PrinterModel {
     this.tubeLive = new LiveTube(64, 12, 2, m.tube);
     this.tube = this.tubeLive.mesh;
     this.gantry.add(this.tube);
+
+    // braided sleeve: head, along the X rods, up the back of the column
+    const braid = braidTexture();
+    this.cableMat = new THREE.MeshStandardMaterial({ color: 0x2a2a2a, roughness: 0.88, metalness: 0.04, map: braid });
+    this.cableLive = new LiveTube(48, 10, 4.2, this.cableMat);
+    this.cable = this.cableLive.mesh;
+    this.root.add(this.cable);
+    this.cableStateX = NaN;
+    this.cableStateY = NaN;
   }
 
   _buildSpool(table, colX) {
     const { m } = this;
     const S = new THREE.Group();
-    const R = 100, width = 68, hubR = 26;
-    // stand: two curved side plates on the desk, rails between, 4 bearings the rims roll on
-    for (const x of [-width / 2 - 9, width / 2 + 9]) {
-      const plateShape = new THREE.Shape();
-      plateShape.moveTo(-80, 0); plateShape.quadraticCurveTo(0, 26, 80, 0);
-      plateShape.lineTo(80, 22); plateShape.quadraticCurveTo(0, 46, -80, 22); plateShape.closePath();
-      const g = new THREE.ExtrudeGeometry(plateShape, { depth: 8, bevelEnabled: false, curveSegments: 16 });
-      const p = new THREE.Mesh(g, m.printed);
-      p.rotation.y = Math.PI / 2; p.position.set(x - 4, table, 0);
-      S.add(p);
-      for (const z of [-44, 44]) S.add(rod('x', x - 6, x + 6, 11, m.chrome, table + 36, z, 24));
-    }
-    for (const z of [-60, 60]) S.add(bb(-width / 2 - 13, width / 2 + 13, table, table + 6, z - 6, z + 6, m.printed, 2));
-    // the spool: flanges + filament winding in the filament colour
-    const cy = table + 36 + Math.sqrt((R + 11) ** 2 - 44 ** 2);
-    const flange = new THREE.CylinderGeometry(R, R, 3, 72);
-    for (const x of [-width / 2 - 1.5, width / 2 + 1.5]) {
+    const zExt = this.zExt, midY = this.colMidY;
+    const R = 92, width = 64, hubR = 22;
+    // arm clipped to the right face of the Z extrusion, axle along X
+    const clipX = colX + 15;
+    S.add(bb(colX + 6, clipX + 8, midY - 24, midY + 24, zExt - 20, zExt + 18, m.printed, 3));
+    const cx = clipX + 36 + width / 2;
+    S.add(bb(clipX, cx - width / 2 + 4, midY - 8, midY + 8, zExt - 9, zExt + 9, m.printed, 2));
+    S.add(rod('x', cx - width / 2 - 10, cx + width / 2 + 12, 6, m.screw, midY, zExt, 16));
+    const flange = new THREE.CylinderGeometry(R, R, 3.2, 64);
+    for (const x of [-width / 2 - 1.6, width / 2 + 1.6]) {
       const f = new THREE.Mesh(flange, m.spool);
-      f.rotation.z = Math.PI / 2; f.position.set(x, cy, 0); S.add(f);
+      f.rotation.z = Math.PI / 2; f.position.set(cx + x, midY, zExt); S.add(f);
     }
-    const hub = new THREE.Mesh(new THREE.CylinderGeometry(hubR, hubR, width, 40, 1, true), m.spool);
-    hub.rotation.z = Math.PI / 2; hub.position.set(0, cy, 0); S.add(hub);
-    const windR = R - 12;
+    const hub = new THREE.Mesh(new THREE.CylinderGeometry(hubR, hubR, width, 32, 1, true), m.spool);
+    hub.rotation.z = Math.PI / 2; hub.position.set(cx, midY, zExt); S.add(hub);
+    const windR = R - 14;
     const wm = m.filament.clone();
     wm.map = windingTexture();
     this.windMat = wm;
-    const wind = new THREE.Mesh(new THREE.CylinderGeometry(windR, windR, width, 72, 1, true), wm);
-    wind.rotation.z = Math.PI / 2; wind.position.set(0, cy, 0); S.add(wind);
-    S.position.set(colX - 30, 0, -260);
-    this.spoolTop = new THREE.Vector3(colX - 30 + 14, cy + windR, -260);
+    const wind = new THREE.Mesh(new THREE.CylinderGeometry(windR, windR, width - 2, 64, 1, true), wm);
+    wind.rotation.z = Math.PI / 2; wind.position.set(cx, midY, zExt); S.add(wind);
+    wind.userData.keep = true;
+    this.spoolTop = new THREE.Vector3(cx, midY + windR, zExt);
     this.root.add(S);
-    // the free strand from the spool to the extruder (rebuilt as the gantry moves)
+    // the free strand from the top of the spool into the extruder
     this.filLive = new LiveTube(32, 6, 0.9, m.filament);
     this.fil = this.filLive.mesh;
     this.root.add(this.fil);
@@ -905,6 +952,19 @@ export class PrinterModel {
       c[2].copy(pin).lerp(mid, 2 / 3);
       F.setBezier(top, c[1], c[2], pin);
     }
+    // braided cable: follows the head in X and the gantry in Z
+    if (this.cableLive && !(Math.abs(hx - this.cableStateX) <= 0.5 && Math.abs(hy - this.cableStateY) <= 0.5)) {
+      this.cableStateX = hx;
+      this.cableStateY = hy;
+      const C = this.cableLive, c = C.ctl;
+      // just in front of the X rods so the sleeve reads from the front, then up the column back
+      const y = hy + 78, z = this.rz + 8;
+      c[0].set(hx - 4, y, z);
+      c[1].set((hx + this.colX) * 0.5, y + 10, z);
+      c[2].set(this.colX + 6, hy + 90, this.zExt - 20);
+      c[3].set(this.colX + 6, this.extTop - 12, this.zExt - 20);
+      C.setBezier(c[0], c[1], c[2], c[3]);
+    }
   }
 
   /** Draw the front screen in the MINI's layout. Returns false if nothing changed. */
@@ -934,6 +994,6 @@ export class PrinterModel {
 
   get bounds() {
     // the printer itself (the spool behind it can run off the edge of the frame)
-    return { min: [-this.bedW / 2 - 90, this.baseY, -170], max: [this.colX + 70, this.colTop, this.bedD / 2 + 90] };
+    return { min: [-this.bedW / 2 - 90, this.baseY, -170], max: [this.colX + 160, this.colTop, this.bedD / 2 + 90] };
   }
 }
