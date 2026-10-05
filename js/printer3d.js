@@ -312,6 +312,258 @@ class LiveTube {
   }
 }
 
+// ---- front screen (MINI layout, measured from a lab photo) --------------
+const SCREEN_FONT = "'DejaVu Sans Mono', Menlo, Consolas, monospace";
+const SC = {
+  bg: '#0b0d16', text: '#dfe6ff', dim: '#aab4e8',
+  barDone: '#e8663a', barLeft: '#2a4fd0',
+  button: '#3040e0', selected: '#7f90f5', accent: '#e8663a',
+  gear: '#1c2450',
+};
+
+function fmtElapsed(sec) {
+  sec = Math.max(0, Math.round(Number(sec) || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m ${String(s).padStart(2, '0')}s`;
+}
+function fmtRemain(min) {
+  min = Math.max(0, Math.round(Number(min) || 0));
+  const h = Math.floor(min / 60), m = min % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+// One character every 0.25 s, holding 1.5 s at each end, then back.
+function marqueeChars(len, nowMs) {
+  const span = len - 20;
+  if (span <= 0) return 0;
+  const step = 250, hold = 1500, leg = span * step, cycle = 2 * (hold + leg);
+  let t = nowMs % cycle;
+  if (t < hold) return 0;
+  t -= hold;
+  if (t < leg) return Math.min(span, Math.floor(t / step));
+  t -= leg;
+  if (t < hold) return span;
+  t -= hold;
+  return Math.max(0, span - Math.floor(t / step));
+}
+function roundRect(g, x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  g.beginPath();
+  g.moveTo(x + rr, y);
+  g.arcTo(x + w, y, x + w, y + h, rr);
+  g.arcTo(x + w, y + h, x, y + h, rr);
+  g.arcTo(x, y + h, x, y, rr);
+  g.arcTo(x, y, x + w, y, rr);
+  g.closePath();
+}
+function drawPlayCircle(g, x, y, r) {
+  g.strokeStyle = SC.text; g.lineWidth = Math.max(2, r * 0.16); g.lineJoin = 'round';
+  g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.stroke();
+  g.fillStyle = SC.text;
+  g.beginPath();
+  g.moveTo(x - r * 0.32, y - r * 0.46);
+  g.lineTo(x + r * 0.5, y);
+  g.lineTo(x - r * 0.32, y + r * 0.46);
+  g.closePath(); g.fill();
+}
+function drawGear(g, x, y, r) {
+  g.save(); g.translate(x, y);
+  g.strokeStyle = SC.gear; g.lineWidth = Math.max(3, r * 0.16); g.lineJoin = 'round'; g.lineCap = 'round';
+  const teeth = 8, inner = r * 0.68, outer = r;
+  g.beginPath();
+  for (let i = 0; i < teeth; i++) {
+    const a = (i / teeth) * Math.PI * 2 - Math.PI / 2, span = (Math.PI * 2) / teeth;
+    const ang = [0.08, 0.36, 0.64, 0.92].map(f => a + span * f);
+    const rad = [inner, outer, outer, inner];
+    for (let k = 0; k < 4; k++) {
+      const px = Math.cos(ang[k]) * rad[k], py = Math.sin(ang[k]) * rad[k];
+      if (i === 0 && k === 0) g.moveTo(px, py); else g.lineTo(px, py);
+    }
+  }
+  g.closePath(); g.stroke();
+  g.beginPath(); g.arc(0, 0, r * 0.42, 0, Math.PI * 2); g.stroke();
+  g.strokeStyle = SC.accent; g.lineWidth = Math.max(3, r * 0.16);
+  g.beginPath(); g.arc(0, 0, r * 0.2, 0, Math.PI * 2); g.stroke();
+  g.restore();
+}
+function drawRingIcon(g, cx, cy, r, drawInner) {
+  g.strokeStyle = '#f4f7ff'; g.lineWidth = Math.max(3, r * 0.1);
+  g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.stroke();
+  drawInner(g, cx, cy, r);
+}
+function drawNozzleIcon(g, x, y, s) {
+  g.strokeStyle = SC.text; g.lineWidth = Math.max(2, s * 0.14); g.lineJoin = 'round'; g.lineCap = 'round';
+  g.strokeRect(x - s * 0.38, y - s * 0.2, s * 0.76, s * 0.46);
+  g.beginPath();
+  g.moveTo(x - s * 0.14, y + s * 0.26); g.lineTo(x, y + s * 0.68); g.lineTo(x + s * 0.14, y + s * 0.26);
+  g.moveTo(x, y - s * 0.2); g.lineTo(x, y - s * 0.58);
+  g.stroke();
+}
+function drawBedHeat(g, x, y, s) {
+  g.strokeStyle = SC.text; g.lineWidth = Math.max(2, s * 0.12); g.lineCap = 'round';
+  g.beginPath(); g.moveTo(x - s * 0.7, y + s * 0.45); g.lineTo(x + s * 0.7, y + s * 0.45); g.stroke();
+  for (let i = 0; i < 3; i++) {
+    const yy = y + s * 0.05 - i * s * 0.28;
+    g.beginPath();
+    g.moveTo(x - s * 0.55, yy);
+    g.bezierCurveTo(x - s * 0.25, yy - s * 0.28, x + s * 0.05, yy + s * 0.28, x + s * 0.55, yy);
+    g.stroke();
+  }
+}
+function drawGauge(g, x, y, s) {
+  g.strokeStyle = SC.text; g.lineWidth = Math.max(2, s * 0.16); g.lineCap = 'round';
+  const r = s * 0.95, cy = y + s * 0.28;
+  g.beginPath(); g.arc(x, cy, r, Math.PI * 1.18, Math.PI * 1.82); g.stroke();
+  g.beginPath(); g.moveTo(x, cy); g.lineTo(x + r * 0.35, cy - r * 0.62); g.stroke();
+  g.fillStyle = SC.text;
+  g.beginPath(); g.arc(x, cy, s * 0.16, 0, Math.PI * 2); g.fill();
+}
+function drawSpoolIcon(g, x, y, s) {
+  g.strokeStyle = SC.accent; g.lineWidth = Math.max(2, s * 0.12);
+  g.beginPath(); g.arc(x, y, s * 0.55, 0, Math.PI * 2); g.stroke();
+  g.beginPath(); g.arc(x, y, s * 0.18, 0, Math.PI * 2); g.stroke();
+}
+
+function drawMiniScreen(c, o) {
+  const g = c.getContext('2d');
+  const W = c.width, H = c.height;
+  const paused = !!(o.paused || o.mode === 'paused');
+  g.textBaseline = 'middle'; g.textAlign = 'left';
+  g.fillStyle = SC.bg; g.fillRect(0, 0, W, H);
+
+  // header
+  const hy = 0.05 * H;
+  drawPlayCircle(g, 0.075 * W, hy, 0.028 * H);
+  let header = 'PRINTING ...';
+  if (o.mode === 'ready') header = 'READY';
+  if (o.mode === 'done') header = 'FINISHED';
+  if (paused) header = 'PAUSED';
+  g.fillStyle = SC.text; g.font = `bold ${Math.round(0.034 * H)}px ${SCREEN_FONT}`;
+  g.fillText(header, 0.13 * W, hy);
+  g.strokeStyle = SC.dim; g.lineWidth = 2;
+  roundRect(g, 0.875 * W, hy - 0.014 * H, 0.07 * W, 0.028 * H, 3); g.stroke();
+
+  // file name marquee: 20 characters fill 0.88W
+  const winX = 0.06 * W, winW = 0.88 * W, nameY = 0.17 * H;
+  if (!c._charW) {
+    g.font = `bold 40px ${SCREEN_FONT}`;
+    const w20 = g.measureText('00000000000000000000').width;
+    c._fontPx = 40 * (winW / w20);
+    g.font = `bold ${c._fontPx}px ${SCREEN_FONT}`;
+    c._charW = g.measureText('0').width;
+  }
+  const name = o.fileName || '';
+  g.save();
+  g.beginPath(); g.rect(winX, nameY - c._fontPx * 0.7, winW, c._fontPx * 1.4); g.clip();
+  g.fillStyle = SC.text; g.font = `bold ${c._fontPx}px ${SCREEN_FONT}`;
+  g.fillText(name, winX - (o.marquee || 0) * c._charW, nameY);
+  g.restore();
+
+  // progress bar
+  const bx = 0.058 * W, bw = (0.935 - 0.058) * W, bh = 0.048 * H, by = 0.263 * H - bh / 2;
+  const frac = pct01(o.percent);
+  roundRect(g, bx, by, bw, bh, bh * 0.35); g.fillStyle = SC.barLeft; g.fill();
+  if (frac > 0) {
+    g.save(); roundRect(g, bx, by, bw, bh, bh * 0.35); g.clip();
+    g.fillStyle = SC.barDone; g.fillRect(bx, by, bw * frac, bh); g.restore();
+  }
+
+  g.fillStyle = SC.text; g.textAlign = 'center';
+  g.font = `bold ${Math.round(0.055 * H)}px ${SCREEN_FONT}`;
+  g.fillText(`${Math.round(o.percent || 0)}%`, W / 2, 0.328 * H);
+
+  const status = o.status1 ? String(o.status1) : '';
+  if (status) {
+    g.textAlign = 'left'; g.fillStyle = SC.text;
+    g.font = `bold ${Math.round(0.042 * H)}px ${SCREEN_FONT}`;
+    g.fillText(status, 0.06 * W, 0.40 * H);
+    if (o.status2) {
+      g.font = `bold ${Math.round(0.038 * H)}px ${SCREEN_FONT}`;
+      g.fillText(String(o.status2), 0.06 * W, 0.455 * H);
+    }
+  } else {
+    g.textAlign = 'center'; g.fillStyle = SC.dim;
+    g.font = `bold ${Math.round(0.028 * H)}px ${SCREEN_FONT}`;
+    g.fillText('Printing time', 0.273 * W, 0.40 * H);
+    g.fillText('Remaining time', 0.738 * W, 0.40 * H);
+    g.fillStyle = SC.text; g.font = `bold ${Math.round(0.04 * H)}px ${SCREEN_FONT}`;
+    g.fillText(fmtElapsed(o.elapsedSec), 0.273 * W, 0.462 * H);
+    g.fillText(fmtRemain(o.remainingMin), 0.738 * W, 0.462 * H);
+  }
+
+  // Tune / Pause / Stop
+  const btnY = 0.578 * H, btnH = (0.78 - 0.578) * H;
+  const buttons = [
+    [0.048, 0.298, 'tune'],
+    [0.36, 0.61, 'pause'],
+    [0.673, 0.927, 'stop'],
+  ];
+  const labels = ['Tune', paused ? 'Resume' : 'Pause', 'Stop'];
+  buttons.forEach(([x0, x1, kind], i) => {
+    const x = x0 * W, w = (x1 - x0) * W;
+    g.fillStyle = kind === 'tune' ? SC.selected : SC.button;
+    roundRect(g, x, btnY, w, btnH, 0.03 * W); g.fill();
+    const cx = x + w / 2, cy = btnY + btnH * 0.46, ir = Math.min(w, btnH) * 0.28;
+    if (kind === 'tune') drawGear(g, cx, cy, ir * 1.15);
+    else if (kind === 'pause') {
+      drawRingIcon(g, cx, cy, ir, (gg, ix, iy, r) => {
+        if (paused) {
+          gg.fillStyle = SC.accent;
+          gg.beginPath();
+          gg.moveTo(ix - r * 0.28, iy - r * 0.42);
+          gg.lineTo(ix + r * 0.48, iy);
+          gg.lineTo(ix - r * 0.28, iy + r * 0.42);
+          gg.closePath(); gg.fill();
+        } else {
+          gg.fillStyle = SC.accent;
+          gg.fillRect(ix - r * 0.38, iy - r * 0.42, r * 0.26, r * 0.84);
+          gg.fillRect(ix + r * 0.12, iy - r * 0.42, r * 0.26, r * 0.84);
+        }
+      });
+    } else {
+      drawRingIcon(g, cx, cy, ir, (gg, ix, iy, r) => {
+        gg.fillStyle = SC.accent;
+        roundRect(gg, ix - r * 0.34, iy - r * 0.34, r * 0.68, r * 0.68, r * 0.12); gg.fill();
+      });
+    }
+    g.fillStyle = SC.dim; g.textAlign = 'center';
+    g.font = `bold ${Math.round(0.03 * H)}px ${SCREEN_FONT}`;
+    g.fillText(labels[i], cx, 0.81 * H);
+  });
+
+  // temps
+  const ty = 0.873 * H;
+  const nCur = Math.round(Number(o.nozzle && o.nozzle.cur) || 0);
+  const nTgt = Math.round(Number(o.nozzle && o.nozzle.tgt) || 0);
+  const bCur = Math.round(Number(o.bed && o.bed.cur) || 0);
+  const bTgt = Math.round(Number(o.bed && o.bed.tgt) || 0);
+  drawNozzleIcon(g, 0.08 * W, ty, 0.028 * H);
+  g.fillStyle = SC.text; g.textAlign = 'left';
+  g.font = `bold ${Math.round(0.032 * H)}px ${SCREEN_FONT}`;
+  g.fillText(`${nCur}/${nTgt}°C`, 0.12 * W, ty);
+  drawBedHeat(g, 0.55 * W, ty, 0.026 * H);
+  g.fillText(`${bCur}/${bTgt}°C`, 0.60 * W, ty);
+
+  // bottom: speed, Z, material
+  const zy = 0.95 * H;
+  drawGauge(g, 0.07 * W, zy, 0.022 * H);
+  g.fillStyle = SC.text; g.textAlign = 'left';
+  g.font = `bold ${Math.round(0.03 * H)}px ${SCREEN_FONT}`;
+  g.fillText(`${Math.round(Number(o.speedPct) || 0)}%`, 0.11 * W, zy);
+  g.fillStyle = SC.accent; g.textAlign = 'center';
+  g.font = `bold ${Math.round(0.032 * H)}px ${SCREEN_FONT}`;
+  const zTxt = Number.isFinite(+o.z) ? (+o.z).toFixed(2) : '';
+  g.fillText('Z', 0.46 * W, zy);
+  g.fillStyle = SC.text; g.textAlign = 'left';
+  g.fillText(zTxt, 0.50 * W, zy);
+  drawSpoolIcon(g, 0.78 * W, zy, 0.022 * H);
+  g.fillStyle = SC.text; g.textAlign = 'left';
+  g.fillText(String(o.material || ''), 0.82 * W, zy);
+  g.textAlign = 'left';
+}
+function pct01(p) { return Math.max(0, Math.min(1, (Number(p) || 0) / 100)); }
+
 // ---- the printer ---------------------------------------------------------
 export class PrinterModel {
   constructor(bedW = 180, bedD = 180) {
@@ -396,11 +648,14 @@ export class PrinterModel {
     disp.add(bb(-32, 32, 0, 118, -13, 13, m.printed, 7));
     disp.add(bb(-27, 27, 40, 112, 12.4, 13.6, m.rubber, 2));                // bezel
     const screenCanvas = document.createElement('canvas');
-    screenCanvas.width = 240; screenCanvas.height = 300;
+    screenCanvas.width = 480; screenCanvas.height = 620;
     this.screenCanvas = screenCanvas;
     this.screenTex = new THREE.CanvasTexture(screenCanvas);
     this.screenTex.colorSpace = THREE.SRGBColorSpace;
-    const screen = new THREE.Mesh(new THREE.PlaneGeometry(47, 60), new THREE.MeshBasicMaterial({ map: this.screenTex, toneMapped: false }));
+    this.screenTex.magFilter = THREE.LinearFilter;
+    this.screenTex.minFilter = THREE.LinearFilter;
+    // 46.5 x 60 keeps the real screen's aspect (~0.776) inside the bezel
+    const screen = new THREE.Mesh(new THREE.PlaneGeometry(46.5, 60), new THREE.MeshBasicMaterial({ map: this.screenTex, toneMapped: false }));
     screen.position.set(0, 76, 13.7);
     disp.add(screen);
     const dial = new THREE.Mesh(new THREE.CylinderGeometry(11, 12, 12, 32), m.printedDark);
@@ -652,25 +907,27 @@ export class PrinterModel {
     }
   }
 
-  /** Draw the little front screen. */
-  setScreen({ title = 'printsim', big = '', line1 = '', line2 = '', progress = 0, accent = '#ff7a1a' }) {
-    const key = [title, big, line1, line2, Math.round(progress * 200), accent].join('|');
+  /** Draw the front screen in the MINI's layout. Returns false if nothing changed. */
+  setScreen(opts = {}) {
+    const o = opts;
+    const name = String(o.fileName || '');
+    const off = name.length > 20 ? marqueeChars(name.length, Date.now()) : 0;
+    const nozzle = o.nozzle || {};
+    const bed = o.bed || {};
+    const pct = Math.max(0, Math.min(100, Math.round(Number(o.percent) || 0)));
+    const key = [
+      o.mode, name, off, pct,
+      fmtElapsed(o.elapsedSec), fmtRemain(o.remainingMin),
+      o.status1 || '', o.status2 || '',
+      Math.round(Number(nozzle.cur) || 0), Math.round(Number(nozzle.tgt) || 0),
+      Math.round(Number(bed.cur) || 0), Math.round(Number(bed.tgt) || 0),
+      Math.round(Number(o.speedPct) || 0),
+      Number.isFinite(+o.z) ? (+o.z).toFixed(2) : '',
+      o.material || '', o.paused || o.mode === 'paused' ? 1 : 0,
+    ].join('|');
     if (key === this._screenKey) return false;
     this._screenKey = key;
-    const c = this.screenCanvas, g = c.getContext('2d');
-    g.fillStyle = '#0b0d10'; g.fillRect(0, 0, c.width, c.height);
-    g.fillStyle = '#16191e'; g.fillRect(0, 0, c.width, 36);
-    g.fillStyle = '#9aa3ad'; g.font = '600 18px system-ui, sans-serif'; g.textBaseline = 'middle';
-    g.fillText(title, 14, 19);
-    g.fillStyle = '#f2f4f7'; g.font = '700 84px system-ui, sans-serif'; g.textAlign = 'center';
-    g.fillText(big, c.width / 2, 120);
-    g.fillStyle = '#2a2e35'; g.fillRect(18, 176, c.width - 36, 12);
-    g.fillStyle = accent; g.fillRect(18, 176, (c.width - 36) * Math.max(0, Math.min(1, progress)), 12);
-    g.fillStyle = '#cfd4db'; g.font = '500 22px system-ui, sans-serif';
-    g.fillText(line1, c.width / 2, 222);
-    g.fillStyle = '#8b939d'; g.font = '500 19px system-ui, sans-serif';
-    g.fillText(line2, c.width / 2, 258);
-    g.textAlign = 'left';
+    drawMiniScreen(this.screenCanvas, { ...o, fileName: name, percent: pct, marquee: off });
     this.screenTex.needsUpdate = true;
     return true;
   }

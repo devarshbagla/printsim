@@ -1,5 +1,5 @@
 import { PrintView, FEATURE_COLORS } from './renderer.js';
-import { buildTimeline, stateAt, timeForPercent, timeForRemaining } from './timeline.js';
+import { buildTimeline, stateAt, timeForPercent, timeForRemaining, tempsAt, remainingAt } from './timeline.js';
 import { FeatureNames, Feature } from './gcode.js';
 import { PRINTERS, AMBIENT, guessPrinter } from './printers.js';
 import { MATERIALS, surfaceFor } from './materials.js';
@@ -274,7 +274,7 @@ function setMode(m) {
   // a live print moves at real speed: 30 fps is smooth and keeps a phone that
   // sits on the page for hours cool (dragging the view still renders at full rate)
   view.maxFps = m === 'run' ? 30 : 0;
-  if (m === 'done') { view.setHead(parsed.segs.move.length, null, false, false); view.setSimTime(1e9); view.setWarnTint(0); view.setScreen({ title: 'finished', big: '100%', line1: 'Print done', line2: '', progress: 1, accent: accentHex() }); }
+  if (m === 'done') { view.setHead(parsed.segs.move.length, null, false, false); view.setSimTime(1e9); view.setWarnTint(0); view.setScreen(screenFor({ mode: 'done', st: stateAt(parsed, tl, tl.total), t: tl.total })); }
   if (m === 'empty') document.title = 'printsim';
   lastUi = 0;
 }
@@ -406,6 +406,43 @@ function accentHex() {
   return getComputedStyle(document.documentElement).getPropertyValue('--accent').trim() || '#ff7a1a';
 }
 
+function fileLabel() {
+  return file ? file.name.replace(/\.(bgcode|gcode)$/i, '') : '';
+}
+
+// The 3D printer's screen. Preview and the ready model show the temps typed
+// in setup. A running job uses tempsAt / remainingAt, and warm-up uses the
+// same words as the MINI (stateAt().prep).
+function screenFor({ mode, st, t, paused }) {
+  const simT = Math.max(0, t || 0);
+  const setupTemps = mode === 'preview' || mode === 'ready' || !tl;
+  const temps = setupTemps
+    ? { nozzle: setup.nozzle, nozzleTarget: setup.nozzle, bed: setup.bed, bedTarget: setup.bed }
+    : tempsAt(tl, simT);
+  const prep = st && st.prep;
+  const showStatus = !!(prep && prep.line1 && st && st.startup);
+  let percent = 0;
+  if (mode === 'done') percent = 100;
+  else if (mode === 'ready' || mode === 'prep' || (st && st.startup)) percent = 0;
+  else percent = Math.min(100, Math.floor(st ? st.percent : 0));
+  return {
+    mode,
+    fileName: fileLabel(),
+    percent,
+    elapsedSec: simT,
+    remainingMin: tl ? remainingAt(tl, simT) : 0,
+    status1: showStatus ? prep.line1 : '',
+    status2: showStatus ? (prep.line2 || '') : '',
+    nozzle: { cur: temps.nozzle, tgt: temps.nozzleTarget },
+    bed: { cur: temps.bed, tgt: temps.bedTarget },
+    speedPct: setup.speedPct || 100,
+    z: st && st.homed ? st.z : 156,
+    material: (MATERIALS[setup.material] && MATERIALS[setup.material].name) || setup.material || 'PLA',
+    paused: !!paused || mode === 'paused',
+    accent: accentHex(),
+  };
+}
+
 // "Which one?": the lab's physical printers of this model. Names are typed by
 // the user, so they only ever go in via textContent.
 function fillUnits() {
@@ -491,7 +528,7 @@ function renderPreview() {
     view.setSimTime(-1e9);
     view.setWarnTint(prefs.physics ? 1 : 0);
     $('scrub-label').textContent = 'Full model';
-    view.setScreen({ title: 'ready', big: fmtDur(tl.total), line1: file ? file.name.replace(/\.b?gcode$/i, '').slice(0, 18) : '', line2: `${parsed.layers.z.length} layers`, progress: 0, accent: accentHex() });
+    view.setScreen(screenFor({ mode: 'ready', st: null, t: 0 }));
     return;
   }
   const st = stateAt(parsed, tl, preview.t);
@@ -505,7 +542,7 @@ function renderPreview() {
     view.setHead(st.segHead, st.head, true, true);
   }
   $('scrub-label').textContent = `Layer ${st.layer + 1}/${st.layerCount} · ${Math.floor(st.percent)}% · ${fmtDur(preview.t - tl.startupEnd)} in`;
-  view.setScreen({ title: 'preview', big: `${Math.floor(st.percent)}%`, line1: `${Math.round(playSpeed())}× timelapse`, line2: `Layer ${st.layer + 1}/${st.layerCount}`, progress: st.percent / 100, accent: accentHex() });
+  view.setScreen(screenFor({ mode: 'preview', st, t: preview.t }));
 }
 
 function setPlaying(on) {
@@ -820,13 +857,10 @@ function updateRunUI(t) {
 
   const pct = Math.min(100, Math.floor(st.percent));
   $('pct').textContent = pct;
-  view.setScreen({
-    title: st.startup ? 'preparing' : run.running ? 'printing' : 'paused',
-    big: st.startup ? '0%' : `${pct}%`,
-    line1: st.startup ? (st.phase || '') : `${fmtDur(Math.max(0, tl.total - s))} left`,
-    line2: `Layer ${st.layer + 1}/${st.layerCount}`,
-    progress: st.percent / 100, accent: accentHex(),
-  });
+  view.setScreen(screenFor({
+    mode: !run.running ? 'paused' : (st.startup ? 'prep' : 'print'),
+    st, t: s, paused: !run.running,
+  }));
   $('bar').style.width = `${st.percent.toFixed(2)}%`;
   $('bar').parentElement.classList.toggle('startup', st.startup);
   $('bar').parentElement.classList.toggle('paused', !run.running); // freezes the warm-up stripes too
@@ -1469,6 +1503,7 @@ window.__printsim = {
   get recording() { return !!rec; },
   get view() { return view; },
   get support() { return parsed && { ...parsed.support, material: parsed.activeMaterial }; },
+  screenCanvas() { return view && view.printer && view.printer.screenCanvas; },
 };
 
 init();

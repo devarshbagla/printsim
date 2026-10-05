@@ -8,7 +8,7 @@ Headless Chromium renders WebGL in software (SwiftShader), about 1 fps at laptop
 size, so viewports are small and timeouts long. window.__printsim.skip(sec)
 jumps the run clock.
 """
-import argparse, functools, http.server, os, pathlib, re, socketserver, sys, threading, urllib.parse
+import argparse, base64, functools, http.server, os, pathlib, re, socketserver, sys, threading, urllib.parse
 
 from playwright.sync_api import sync_playwright
 
@@ -489,6 +489,49 @@ def main():
         phase = page.inner_text('#st-phase')
         check('prelude Now row shows Probing n/16', re.fullmatch(r'Probing \d+/16', phase) is not None, phase)
         check('prelude probe: no JS errors', not errors, '; '.join(errors)[:300])
+        ctx.close()
+
+        # ---- MINI screen: canvas is drawn, and a long file name scrolls ----
+        errors = []
+        ctx, page = new_page(browser, url, 390, 844, errors)
+        load_bytes(page, 'Ghosts_0.4n_0.2mm_PLA_MINIIS_1h27m.gcode', (ROOT / 'test/fixtures/mini-prelude.gcode').read_bytes())
+        start(page)
+        page.wait_for_function('''() => {
+          const c = window.__printsim.screenCanvas && window.__printsim.screenCanvas();
+          if (!c || c.width < 400) return false;
+          const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data;
+          const colors = new Set();
+          for (let i = 0; i < d.length; i += 80) colors.add(d[i]);
+          return colors.size > 4;
+        }''')
+        band = '''() => {
+          const c = window.__printsim.screenCanvas();
+          const y = Math.round(c.height * 0.17);
+          const d = c.getContext('2d').getImageData(16, y - 18, c.width - 32, 36).data;
+          let s = '';
+          for (let i = 0; i < d.length; i += 24) s += d[i];
+          return s;
+        }'''
+        first = page.evaluate(band)
+        page.wait_for_timeout(3200)
+        second = page.evaluate(band)
+        check('MINI screen canvas is drawn', len(first) > 20)
+        check('MINI screen file name scrolls', first != second, f'{len(first)} vs {len(second)}')
+        if shots:
+            for label, kind, frac in (('bed', 'bed', 0.05), ('homing', 'homing', 0.4), ('probe', 'probe', 0.22)):
+                sec = page.evaluate('''(arg) => {
+                  const tl = window.__printsim.timeline;
+                  const ph = tl.phases.find((x) => x.kind === arg.kind);
+                  const t = tl.tStart(ph.move) + tl.dur[ph.move] * arg.frac;
+                  const run = window.__printsim.run;
+                  const sim = run.anchorSim + (Date.now() - run.anchorWall) / 1000;
+                  return t - sim;
+                }''', {'kind': kind, 'frac': frac})
+                page.evaluate('(s) => window.__printsim.skip(s)', sec)
+                page.wait_for_timeout(400)
+                data = page.evaluate('''() => window.__printsim.screenCanvas().toDataURL("image/png")''')
+                (shots / f'screen-{label}.png').write_bytes(base64.b64decode(data.split(',', 1)[1]))
+        check('MINI screen: no JS errors', not errors, '; '.join(errors)[:300])
         ctx.close()
 
         browser.close()
