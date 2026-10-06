@@ -106,6 +106,13 @@ const check = (name, ok, detail = '') => {
     prevR = v;
   }
   check('remainingAt is 87 min before printing and never increases', rMono && remainingAt(tl, 0) === 87 && remainingAt(tl, tl.startupEnd - 0.5) === 87 && remainingAt(tl, tl.total) === 0, `start ${remainingAt(tl, 0)} end ${remainingAt(tl, tl.total)}`);
+  // like the printer: hold the last M73 R passed until the next one arrives
+  let stepOk = true;
+  for (let i = 0; i + 1 < tl.rAnchors.length; i++) {
+    const a = tl.rAnchors[i], b = tl.rAnchors[i + 1];
+    if (b.t > a.t && remainingAt(tl, (a.t + b.t) / 2) !== a.r) stepOk = false;
+  }
+  check('remainingAt holds the last M73 R until the next mark (no interpolation)', stepOk);
   const half = buildTimeline(parsed, printer, { nozzleNow: 22, bedNow: 22, speedPct: 50 });
   check('remainingAt scales with print speed % (50% shows 174 min at the start)', remainingAt(half, 0) === 174, String(remainingAt(half, 0)));
   const noR = buildTimeline({ ...parsed, anchors: parsed.anchors.map(a => ({ ...a, r: NaN })) }, printer, { nozzleNow: 22, bedNow: 22 });

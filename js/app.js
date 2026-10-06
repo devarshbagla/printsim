@@ -898,6 +898,7 @@ function updateRunUI(t) {
     }
   }
   $('st-phase').textContent = now_;
+  $('st-phase').closest('.stats').classList.toggle('prep', !!st.startup);
 
   // buttons
   show('btn-extruding', !run.extrudeWall && s < tl.startupEnd + 300);

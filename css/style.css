@@ -514,6 +514,9 @@ dialog .actions { margin-top: 16px; }
   .stats .wide { grid-column: auto; }
   .stats > div { padding: 8px 10px; }
   .stats .v { font-size: 14.5px; }
+  /* warm-up: layer and height say nothing yet, so the printer's status gets the whole row */
+  .stats.prep > div:not(.wide) { display: none; }
+  .stats.prep .wide { grid-column: 1 / -1; }
 }
 
 /* ---------- calendar reminders ---------- */

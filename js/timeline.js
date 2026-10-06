@@ -410,7 +410,7 @@ export function tempsAt(tl, t) {
 
 /**
  * "Time left" the MINI would show, in minutes.
- * Interpolated from the M73 R table (rAnchors), scaled the same way
+ * The last M73 R mark already passed (rAnchors), scaled the same way
  * timeForRemaining undoes the speed % (shown = file R * 100 / speed%).
  * Before the first anchor (the whole prelude) this is the first R.
  * Files with no R marks fall back to (total - t) / 60.
@@ -421,20 +421,15 @@ export function remainingAt(tl, t) {
   const tc = Number.isFinite(t) ? t : 0;
   if (!ra || ra.length < 2) return Math.max(0, (tl.total - Math.max(0, tc)) / 60);
   const scale = 100 / (tl.speedPct || 100);
-  const shown = (fileMin) => Math.max(0, fileMin) * scale;
-  if (tc <= ra[0].t) return shown(ra[0].r);
-  for (let i = 1; i < ra.length; i++) {
-    const a = ra[i - 1], b = ra[i];
-    if (tc <= b.t) {
-      const f = b.t > a.t ? (tc - a.t) / (b.t - a.t) : 1;
-      return shown(a.r + (b.r - a.r) * Math.min(1, Math.max(0, f)));
-    }
+  // the MINI shows the last M73 R it received and steps down a whole minute at
+  // each new mark (timeForRemaining assumes the same), so no interpolation
+  let j = 0;
+  for (let lo = 0, hi = ra.length - 1; lo <= hi;) {
+    const mid = (lo + hi) >> 1;
+    if (ra[mid].t <= tc) { j = mid; lo = mid + 1; } else hi = mid - 1;
   }
-  const last = ra[ra.length - 1];
-  if (!(tl.total > last.t)) return shown(last.r);
   if (tc >= tl.total) return 0;
-  const f = (tc - last.t) / (tl.total - last.t);
-  return shown(last.r * (1 - Math.min(1, Math.max(0, f))));
+  return Math.max(0, ra[j].r) * scale;
 }
 
 /**

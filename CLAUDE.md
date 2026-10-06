@@ -24,7 +24,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 
 - No build step: plain ES modules, three.js r170 vendored in `vendor/`, import map in `index.html`. Keep it that way.
 - Everything runs in the browser. User files never leave the device.
-- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v22`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
+- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v23`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
 - File-derived text (file names, config values) goes in via `textContent`, never `innerHTML`.
 - The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops (reshaped in place each frame, never flatter than a 30 mm lift), 190x200 sheet, spool on a printed arm beside the Z column (axis along X) in the filament colour, like the Brandeis lab MINI+. Static parts merged per material (~44 draw calls).
 - Timelapse speeds are 10x / 50x / 200x / 1000x + layer by layer (2x to 8x was rejected as useless).
@@ -102,6 +102,7 @@ Cessna kits, YAFIC cube on his Google Drive) are not in the repo; all were 0%. A
 
 Each line is a pushed commit; CI was green and the deploy confirmed for every one.
 
+- **v23** Two fixes found sweeping v22. On short phones (3-column stats) the warm-up status was cut to "Waiting for h...": during warm-up Layer and Height hide and Now takes the row (`.stats.prep`). `remainingAt` stepped like the printer (last `M73 R` passed) instead of interpolating, so the 3D screen's time left matches the real one and `timeForRemaining`.
 - **v22 `163c687`** (v20 to v22 built by Cursor Grok from a Claude prompt, reviewed by Claude: clean apart from an empty Now row during the travel to the purge line, fixed in the merge commit) Printer model closer to the lab MINI+: spool on a side arm (axis along X), black braided cable along the X rods and up the column, black frame against graphite printed parts, taller Bowden arc, yellow triangles, display leaned back about 27 degrees.
 - **v21 `a7a772d`** The 3D printer's screen is redrawn like the MINI: PRINTING header, scrolling file name, orange/blue bar, printing time and remaining time, Tune/Pause/Stop, nozzle and bed, speed, Z, material. Canvas is 480x620. `remainingAt` and `tempsAt` feed it.
 - **v20 `672ebcf`** Real MINI prelude. Both heaters keep moving (`tempsAt`). Status words match the printer (`MINI_STATUS`: Waiting for hotend, Waiting for bed, Homing, Probing n/16). The head follows the 16-point mesh. `remainingAt` is the on-screen time left from `M73 R`. Probe overhead 0.15 s to 0.45 s from one lab print (2 Oct 2026), about 4.8 s on a 16-point mesh.
