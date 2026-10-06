@@ -886,7 +886,9 @@ function updateRunUI(t) {
   $('st-z').textContent = st.startup ? '-' : `${st.z.toFixed(2)} mm`;
   let now_ = st.phase;
   if (!now_) {
-    if (st.startup) now_ = '';
+    // the printer's screen shows no status here (travel to the intro line), but
+    // an empty Now box looks broken, so say what the printer is doing
+    if (st.startup) now_ = st.homed ? 'Moving to the purge line' : 'Preparing';
     else {
       now_ = st.feature === Feature.Custom ? 'Purge line' : FeatureNames[st.feature];
       if (!st.extruding && !ended) now_ = `Travel · ${now_}`;
