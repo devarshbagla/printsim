@@ -218,8 +218,13 @@ const vert = /* glsl */`
     // sub-pixel strands: keep them at least ~0.6 px wide (no gaps, no flicker)
     float dist = length(cameraPosition - midW);
     float px = rE * uPxScale / max(dist, 1e-3);
-    float half_ = max(rE, min(0.6 * dist / uPxScale, width * 0.5));
-    vDetail = smoothstep(0.7, 2.4, px);
+    // half a pixel extra so stacked layers that only just touch never leave a
+    // hairline gap for the background to show through (the extra band shades as
+    // the edge of the profile)
+    float half_ = max(rE + 0.5 * dist / uPxScale, min(0.6 * dist / uPxScale, width * 0.5));
+    // full groove profile only once a layer is several pixels tall: at 2-4 px the
+    // grooves alias into stripes and dashes where short segments meet
+    vDetail = smoothstep(1.4, 4.5, px);
     vT = corner.y * half_;
 
     float ext = width * 0.25;
@@ -323,17 +328,26 @@ const frag = /* glsl */`
       return;
     }
 
-    vec3 base = vColor;
+    // real white PLA is a diffuse reflector of roughly 70-75%, not 100%: a picked white would
+    // otherwise run into the highlight roll-off everywhere and lose all shading
+    vec3 base = vColor * mix(1.0, 0.76, smoothstep(0.45, 0.9, dot(vColor, vec3(0.2126, 0.7152, 0.0722))));
     float rough = vIron > 0.5 ? max(uRough * 0.45, 0.12) : uRough;
     rough = mix(rough, max(rough * 0.45, 0.1), vSoft); // molten plastic looks wet
     float a = rough * rough;
     float NdV = clamp(dot(N, V), 1e-3, 1.0);
     vec3 F0 = mix(vec3(0.045), base, uMetal);
 
+    // Plastic is translucent, light filament most of all: light scatters inside
+    // the strands and fills the grooves between layers, so on a real white PLA
+    // print the layer lines are faint, not dark. Dark filament absorbs that light
+    // before it gets far, so it keeps its crisp grooves.
+    float lum = dot(base, vec3(0.2126, 0.7152, 0.0722));
+    float trans = mix(0.12, 0.7, smoothstep(0.2, 0.9, lum)) * (1.0 - uMetal);
     // grooves between layers (profile facing down/in) get less light
-    float ao = mix(0.55, 1.0, smoothstep(-0.95, 0.45, n2.y));
-    vec3 amb = mix(vec3(0.09, 0.085, 0.08), vec3(0.52, 0.57, 0.66), N.y * 0.5 + 0.5) * 0.36;
-    vec3 diff = amb * ao;
+    float ao = mix(mix(0.55, 1.0, smoothstep(-0.95, 0.45, n2.y)), 1.0, trans * 0.55);
+    // the bed and the part itself bounce light back up into downward faces
+    vec3 amb = mix(vec3(0.17, 0.165, 0.16), vec3(0.52, 0.57, 0.66), N.y * 0.5 + 0.5) * 0.36;
+    vec3 diff = amb * ao + vec3(0.07) * trans;
     vec3 spec = vec3(0.0);
     // key (front right, high), cool fill (left), rim (behind)
     vec3 Ls[3]; vec3 Cs[3];
@@ -344,7 +358,8 @@ const frag = /* glsl */`
       vec3 L = Ls[i];
       float NdL = dot(N, L);
       // PLA & co. are a little translucent: light wraps round the strand a bit
-      diff += Cs[i] * max((NdL + 0.12) / 1.12, 0.0) * mix(0.75, 1.0, ao);
+      float w = mix(0.12, 0.38, trans);
+      diff += Cs[i] * max((NdL + w) / (1.0 + w), 0.0) * mix(0.75, 1.0, ao);
       if (NdL > 0.0) {
         vec3 Hh = normalize(L + V);
         float VdH = clamp(dot(V, Hh), 0.0, 1.0);
@@ -376,7 +391,9 @@ const frag = /* glsl */`
     col = mix(col, min(base * 1.35 + vec3(0.08), vec3(1.0)), clamp(vHot + vSoft * 0.12, 0.0, 0.4));
     // soft shoulder instead of hard clipping on white filament and highlights
     float m = max(col.r, max(col.g, col.b));
-    if (m > 0.8) col *= (0.8 + (1.0 - exp(-(m - 0.8) * 2.5)) * 0.2) / m;
+    // (starts at 0.7 like a camera's highlight roll-off, so a lit white wall
+    // still shows its folds instead of one flat blown-out white)
+    if (m > 0.7) col *= (0.7 + (1.0 - exp(-(m - 0.7) * 2.2)) * 0.3) / m;
     gl_FragColor = vec4(col, 1.0);
     #include <colorspace_fragment>
   }

@@ -24,7 +24,7 @@ Brandeis, which are **not networked**, so this is a timed simulation with manual
 
 - No build step: plain ES modules, three.js r170 vendored in `vendor/`, import map in `index.html`. Keep it that way.
 - Everything runs in the browser. User files never leave the device.
-- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v23`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
+- **Bump `CACHE` in `sw.js`** (`printsim-vN`, currently `printsim-v24`) on every release, and add any new `js/` module to its precache list (CI fails otherwise; a missing module breaks offline boot).
 - File-derived text (file names, config values) goes in via `textContent`, never `innerHTML`.
 - The 3D printer is MINI-*style*, not a replica: no Prusa logos, wordmark or signature orange. Layout, sizes and motion follow Prusa's open-source part drawings ([Original-Prusa-MINI](https://github.com/prusa3d/Original-Prusa-MINI)): 30x30x289 Z extrusion, two 262 mm Y extrusions, extruder rides the Z carriage, probe 29 mm left of the nozzle, 275 mm Bowden tube that loops (reshaped in place each frame, never flatter than a 30 mm lift), 190x200 sheet, spool on a printed arm beside the Z column (axis along X) in the filament colour, like the Brandeis lab MINI+. Static parts merged per material (~44 draw calls).
 - Timelapse speeds are 10x / 50x / 200x / 1000x + layer by layer (2x to 8x was rejected as useless).
@@ -102,6 +102,7 @@ Cessna kits, YAFIC cube on his Google Drive) are not in the repo; all were 0%. A
 
 Each line is a pushed commit; CI was green and the deploy confirmed for every one.
 
+- **v24** Light filament looks like the lab photo of the Ghosts print instead of a grainy grey knit. Cause: grooves between layers went near black (downward normals, no bounce light) and the full groove profile kicked in at ~1.4 px layers, aliasing into stripes and dashes. Fix in the strand fragment shader: translucency `trans` from the colour's luminance (wrap, shallower AO, small internal glow), raised ambient floor, `vDetail` from 1.4..4.5 px, +0.5 px strand half-width, near-white albedo x0.76, roll-off from 0.7. Measured against the photo with a headless close-up (brightness percentiles, see VERIFICATION). Renders are SwiftShader at DPR 1, so check on a real phone.
 - **v23** Two fixes found sweeping v22. On short phones (3-column stats) the warm-up status was cut to "Waiting for h...": during warm-up Layer and Height hide and Now takes the row (`.stats.prep`). `remainingAt` stepped like the printer (last `M73 R` passed) instead of interpolating, so the 3D screen's time left matches the real one and `timeForRemaining`.
 - **v22 `163c687`** (v20 to v22 built by Cursor Grok from a Claude prompt, reviewed by Claude: clean apart from an empty Now row during the travel to the purge line, fixed in the merge commit) Printer model closer to the lab MINI+: spool on a side arm (axis along X), black braided cable along the X rods and up the column, black frame against graphite printed parts, taller Bowden arc, yellow triangles, display leaned back about 27 degrees.
 - **v21 `a7a772d`** The 3D printer's screen is redrawn like the MINI: PRINTING header, scrolling file name, orange/blue bar, printing time and remaining time, Tune/Pause/Stop, nozzle and bed, speed, Z, material. Canvas is 480x620. `remainingAt` and `tempsAt` feed it.
@@ -120,7 +121,7 @@ Left, in Claude's recommended order:
 - **#2 snap-to-resync**: point the phone at the printer screen, on-device OCR reads % and time left. Nothing leaves the phone.
 - **#8 "risk" colour mode**: colour strands by physics state (held, sagging, hinged, falling). The shader already gets the data; touches renderer.js, so Claude, not Cursor.
 - **#9 multi-printer dashboard** (several MINIs at once), **#10 laptop to phone handoff via QR** (start time, speed, file hash), **#11 status link** (ETA countdown URL, no server).
-- Skip for now: more rendering realism (past diminishing returns).
+- Rendering realism: done in v24 from real lab photos. Further work only against new photos, not by eye.
 
 ## Working with Cursor
 
