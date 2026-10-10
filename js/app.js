@@ -4,6 +4,7 @@ import { FeatureNames, Feature } from './gcode.js';
 import { PRINTERS, AMBIENT, guessPrinter } from './printers.js';
 import { MATERIALS, surfaceFor } from './materials.js';
 import { idbGet, idbSet, idbDel, lsGet, lsSet, listUnits, getUnit, addUnit, removeUnit, effectiveCalibration, learnCalibration } from './store.js';
+import { currentId, fileKey, sessionKey, printUrl, splitUrl, parseSplit, listPrints, putPrint, dropPrint, nextId, splitIds, summary, statusOf, labelOf } from './slots.js';
 import { planEvents, buildIcs, googleCalendarUrl } from './ics.js';
 import { clockToWall, wallToClock, expectedEndWall, measureRun } from './finish.js';
 import { spaghettiReport, fmtGrams } from './report.js';
@@ -24,6 +25,10 @@ const SWATCHES = [
 
 const prefs = Object.assign({ color: null, ghost: true, ghostRun: false, colorMode: 'filament', printerId: null, speed: 200, layerMode: false, physics: true, printerView: true, spoolLeft: null, unitId: null }, lsGet('printsim.prefs', {}));
 const savePrefs = () => lsSet('printsim.prefs', prefs);
+// which print this page tracks (?print=N); embed = a pane of the laptop split view
+const QS = new URLSearchParams(location.search);
+const PRINT = currentId();
+const EMBED = QS.has('embed');
 // "what's left to print" overlay: on while previewing, off by default while a
 // print runs (the live build reads better on its own); each remembered separately
 const ghostKey = () => (mode === 'run' ? 'ghostRun' : 'ghost');
@@ -89,7 +94,15 @@ function setAccent(hex) {
 
 // ---------------------------------------------------------------- persistence
 function saveSession() {
-  idbSet('session', { mode, setup, run, doneText: mode === 'done' ? $('done-text').textContent : undefined, savedAt: Date.now() });
+  writeSummary();
+  return idbSet(sessionKey(PRINT), { mode, setup, run, doneText: mode === 'done' ? $('done-text').textContent : undefined, savedAt: Date.now() });
+}
+// one line about this print for the other pages' print switcher
+function writeSummary() {
+  if (!file || mode === 'empty') return;
+  const u = setup && setup.unitId ? getUnit(setup.unitId) : null;
+  putPrint(summary({ id: PRINT, mode, fileName: file.name, unitName: u && u.name, color: setup && setup.color, run, total: tl ? tl.total : 0 }));
+  updatePrintsChip();
 }
 
 // Ask the browser not to evict our storage under disk pressure. Chrome grants
@@ -144,7 +157,7 @@ async function openFile(name, bytes, restore = null) {
     file = { name, bytes };
     onParsed(restore);
     if (!restore) {
-      await idbSet('file', { name, bytes });
+      await idbSet(fileKey(PRINT), { name, bytes });
       requestPersistence();
     }
   } catch (err) {
@@ -261,6 +274,7 @@ function setMode(m) {
   show('sheet', m !== 'empty');
   show('viewctl', m !== 'empty');
   show('btn-new', m !== 'empty');
+  updatePrintsChip();
   show('panel-setup', m === 'setup');
   show('panel-run', m === 'run');
   show('panel-done', m === 'done');
@@ -790,7 +804,8 @@ function printerFinished(finishWall = now()) {
   run.anchorSim = tl.total;
   renderDone(text);
   setMode('done');
-  idbSet('session', { mode: 'done', setup, run, doneText: text });
+  idbSet(sessionKey(PRINT), { mode: 'done', setup, run, doneText: text });
+  writeSummary();
 }
 
 function renderDone(text) { $('done-text').textContent = text || ''; }
@@ -832,7 +847,8 @@ function printFailed() {
   const text = 'Marked as failed. Calibration was left alone, since a failed print says nothing about how fast the printer is.';
   renderDone(text);
   setMode('done');
-  idbSet('session', { mode: 'done', setup, run, doneText: text });
+  idbSet(sessionKey(PRINT), { mode: 'done', setup, run, doneText: text });
+  writeSummary();
 }
 
 // Came back after the print should have ended and never said so: ask, once per ETA
@@ -1021,8 +1037,9 @@ function calendarEvents() {
   const printer = PRINTERS[setup.printerId];
   return planEvents({
     nowMs: t, simNow: simNow(t), total: tl.total, pauses: tl.pauses,
-    name: file.name, printer: printer ? printer.name : '', url: location.origin + location.pathname,
-    finishUrl: `${location.origin}${location.pathname}?done=1`,
+    name: file.name, printer: printer ? printer.name : '',
+    url: location.origin + location.pathname + (PRINT !== '1' ? `?print=${PRINT}` : ''),
+    finishUrl: `${location.origin}${location.pathname}?${PRINT !== '1' ? `print=${PRINT}&` : ''}done=1`,
   });
 }
 
@@ -1230,8 +1247,160 @@ function confirmBox(title, text, okLabel = 'OK') {
   });
 }
 
+// ---------------------------------------------------------------- several prints
+// The lab has a row of MINI+ printers. Each print is its own page (?print=N),
+// so switching is just going to that page, a tab can hold a different print,
+// and the laptop split view is 2 or 3 of those pages side by side.
+function otherPrints() { return listPrints().filter((p) => p.id !== PRINT); }
+function thisPrint() {
+  return listPrints().find((p) => p.id === PRINT) || { id: PRINT, mode: 'empty' };
+}
+function updatePrintsChip() {
+  const btn = $('btn-prints');
+  if (!btn) return;
+  const others = otherPrints().length;
+  show(btn, mode !== 'empty' || others > 0);
+  $('prints-label').textContent = labelOf(thisPrint(), PRINT);
+  $('prints-count').textContent = String(others + 1);
+  show('prints-count', others > 0);
+  btn.setAttribute('aria-label', others ? `Switch print (${others + 1} prints)` : 'Track another print');
+}
+function printStatusText(st) {
+  switch (st.state) {
+    case 'empty': return 'No file yet';
+    case 'setup': return 'Loaded, not started';
+    case 'done': return 'Finished';
+    case 'paused': return `Paused · ${fmtDur(st.left)} left`;
+    case 'over': return 'Should be done by now';
+    default: return `${fmtDur(st.left)} left · done ${clock(st.eta)}`;
+  }
+}
+function renderPrints() {
+  const list = $('prints-list');
+  list.replaceChildren();
+  const all = listPrints();
+  if (!all.some((p) => p.id === PRINT)) all.push(thisPrint());
+  all.sort((a, b) => Number(a.id) - Number(b.id));
+  const t = now();
+  for (const p of all) {
+    const cur = p.id === PRINT;
+    const st = statusOf(p, t);
+    const row = document.createElement('div');
+    row.className = `print-row${cur ? ' current' : ''}`;
+    row.setAttribute('role', 'listitem');
+    const go = document.createElement('button');
+    go.type = 'button'; go.className = 'print-go'; go.dataset.id = p.id;
+    const dot = document.createElement('span'); dot.className = 'print-dot';
+    if (p.color) dot.style.background = p.color;
+    const title = document.createElement('span'); title.className = 'print-title';
+    title.textContent = labelOf(p, p.id);
+    if (cur) { const tag = document.createElement('small'); tag.textContent = 'here'; title.append(tag); }
+    const sub = document.createElement('span'); sub.className = 'print-sub';
+    sub.textContent = [p.file ? p.file.replace(/\.(bgcode|gcode)$/i, '') : '', printStatusText(st)].filter(Boolean).join(' · ');
+    const bar = document.createElement('span'); bar.className = 'print-bar';
+    const fill = document.createElement('i'); fill.style.width = `${(st.frac * 100).toFixed(1)}%`;
+    if (p.color) fill.style.background = p.color;
+    bar.append(fill);
+    go.append(dot, title, sub, bar);
+    if (cur) go.setAttribute('aria-current', 'page');
+    else go.onclick = () => goPrint(p.id);
+    row.append(go);
+    if (!cur && !EMBED) {
+      const tab = document.createElement('a');
+      tab.className = 'print-act newtab'; tab.href = printUrl(p.id, { base: location.pathname }); tab.target = '_blank'; tab.rel = 'noopener';
+      tab.setAttribute('aria-label', `Open ${labelOf(p, p.id)} in a new tab`); tab.title = 'Open in a new tab';
+      tab.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg>';
+      row.append(tab);
+    }
+    if (!cur) {
+      const del = document.createElement('button');
+      del.type = 'button'; del.className = 'print-act'; del.title = 'Stop tracking';
+      del.setAttribute('aria-label', `Stop tracking ${labelOf(p, p.id)}`);
+      del.innerHTML = '<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+      del.onclick = () => removePrint(p);
+      row.append(del);
+    }
+    list.append(row);
+  }
+  show('prints-split', !EMBED && window.matchMedia('(min-width: 900px)').matches);
+}
+function openPrints() {
+  renderPrints();
+  const d = $('dlg-prints');
+  if (!d.open) d.showModal();
+}
+async function goPrint(id, url = printUrl(id, { base: location.pathname, embed: EMBED })) {
+  if (parsed && mode !== 'empty') { try { await saveSession(); } catch (e) { /* still go */ } }
+  location.assign(url);
+}
+async function removePrint(p) {
+  const d = $('dlg-prints');
+  d.close();
+  const ok = await confirmBox(`Stop tracking ${labelOf(p, p.id)}?`, 'Its file and progress are removed from this device. The real printer keeps going, of course.', 'Stop tracking');
+  if (ok) {
+    await idbDel(fileKey(p.id));
+    await idbDel(sessionKey(p.id));
+    dropPrint(p.id);
+    updatePrintsChip();
+  }
+  openPrints();
+}
+function splitTo(n, first = PRINT, pane = []) {
+  const ids = splitIds(first, pane.concat(listPrints().map((p) => p.id)), n);
+  return goPrint(null, splitUrl(ids, location.pathname));
+}
+
+// The outer page of the split view: no 3D view of its own, just 2 or 3 panes.
+function initSplit(ids) {
+  document.body.classList.add('split-mode');
+  document.title = 'printsim · side by side';
+  const bar = document.createElement('div'); bar.className = 'split-bar';
+  const brand = document.createElement('div'); brand.className = 'brand';
+  brand.innerHTML = '<img src="icons/icon.svg" alt="" width="20" height="20">printsim<span>side by side</span>';
+  bar.append(brand);
+  for (const n of [2, 3]) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'pill'; b.textContent = `${n} prints`;
+    b.setAttribute('aria-pressed', String(ids.length === n));
+    b.onclick = () => { if (ids.length !== n) location.assign(splitUrl(splitIds(ids[0], ids.slice(1).concat(listPrints().map((p) => p.id)), n), location.pathname)); };
+    bar.append(b);
+  }
+  const exit = document.createElement('button');
+  exit.type = 'button'; exit.className = 'chip'; exit.textContent = 'Exit split view';
+  exit.onclick = () => location.assign(printUrl(ids[0], { base: location.pathname }));
+  bar.append(exit);
+  const grid = document.createElement('div'); grid.className = 'split-grid';
+  grid.style.gridTemplateColumns = `repeat(${ids.length}, minmax(0, 1fr))`;
+  const frames = ids.map((id) => {
+    const f = document.createElement('iframe');
+    f.src = printUrl(id, { base: location.pathname, embed: true });
+    f.title = `Print ${id}`;
+    f.allow = 'screen-wake-lock; clipboard-write; web-share; fullscreen';
+    grid.append(f);
+    return f;
+  });
+  document.body.append(bar, grid);
+  // a pane that switched print tells us, so the address bar stays right on reload
+  window.addEventListener('message', (e) => {
+    if (e.origin !== location.origin || !e.data || e.data.type !== 'printsim:pane') return;
+    const i = frames.findIndex((f) => f.contentWindow === e.source);
+    if (i < 0) return;
+    ids[i] = String(e.data.print);
+    history.replaceState(null, '', splitUrl(ids, location.pathname));
+  });
+}
+
 // ---------------------------------------------------------------- wiring
 function wire() {
+  $('btn-prints').onclick = openPrints;
+  $('btn-print-add').onclick = () => goPrint(nextId(listPrints().map((p) => p.id).concat(PRINT)));
+  for (const b of document.querySelectorAll('#prints-split [data-split]')) b.onclick = () => splitTo(Number(b.dataset.split));
+  // another tab or pane saved: keep the chip and an open list current
+  window.addEventListener('storage', (e) => {
+    if (e.key !== 'printsim.prints') return;
+    updatePrintsChip();
+    if ($('dlg-prints').open) renderPrints();
+  });
   const fileInput = $('file');
   fileInput.addEventListener('change', async () => {
     const f = fileInput.files[0];
@@ -1419,8 +1588,10 @@ async function handleFile(f) {
 async function newFile() {
   if (mode === 'run' && !(await confirmBox('Close this print?', 'The running sim will stop and the file is unloaded.', 'Close'))) return;
   run = null; parsed = null; spoolCum = null; tl = null; file = null;
-  await idbDel('file');
-  await idbDel('session');
+  await idbDel(fileKey(PRINT));
+  await idbDel(sessionKey(PRINT));
+  dropPrint(PRINT);
+  updatePrintsChip();
   view.setData({ start: new Float32Array(0), end: new Float32Array(0), meta: new Float32Array(0), move: new Uint32Array(0) }, null);
   view.setHead(0, null, false, false);
   setMode('empty');
@@ -1465,6 +1636,16 @@ function frame() {
 }
 
 async function init() {
+  const split = parseSplit();
+  if (split) {
+    initSplit(split);
+    if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+    return;
+  }
+  if (EMBED) {
+    document.body.classList.add('embed');
+    if (window.parent !== window) window.parent.postMessage({ type: 'printsim:pane', print: PRINT }, location.origin);
+  }
   view = new PrintView($('view'));
   view.onFrame = frame;
   view.setColorMode(prefs.colorMode);
@@ -1478,15 +1659,16 @@ async function init() {
   updateSpeedNote();
   setMode('empty');
 
-  const saved = await idbGet('file');
+  const saved = await idbGet(fileKey(PRINT));
   if (saved && saved.bytes) {
-    const session = await idbGet('session');
+    const session = await idbGet(sessionKey(PRINT));
     await openFile(saved.name, saved.bytes instanceof Uint8Array ? saved.bytes : new Uint8Array(saved.bytes), session || { setup: null });
   }
   // opened from the calendar's "Print done" alert
   const q = new URLSearchParams(location.search);
   if (q.has('done')) {
-    history.replaceState(null, '', location.pathname + location.hash);
+    q.delete('done'); // keep ?print=N
+    history.replaceState(null, '', location.pathname + (q.toString() ? `?${q}` : '') + location.hash);
     if (mode === 'run') openFinishDialog();
     else if (mode !== 'done') toast('No print is running here. Started it from your home-screen app? Open printsim there.', 5000);
   } else maybeAskFinish();

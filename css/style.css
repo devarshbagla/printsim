@@ -68,6 +68,51 @@ button, input, select { font: inherit; color: inherit; }
 }
 .chip:hover { border-color: rgba(255,255,255,.28); }
 
+/* ---------- several prints ---------- */
+.top-actions { display: flex; align-items: center; gap: 8px; }
+.prints-chip { display: inline-flex; align-items: center; gap: 7px; max-width: 46vw; }
+.prints-chip span:first-of-type { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.prints-count {
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; display: inline-grid; place-items: center;
+  font-size: 11px; font-weight: 600; background: var(--accent); color: var(--accent-ink);
+}
+.prints-dlg { width: min(420px, calc(100vw - 32px)); }
+.prints-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.prints-head h3 { margin: 0; }
+.prints-list { display: grid; gap: 8px; margin: 4px 0 12px; max-height: min(52vh, 420px); overflow-y: auto; }
+.print-row { display: flex; align-items: stretch; gap: 6px; border: 1px solid var(--line-2); border-radius: 14px; background: rgba(255,255,255,.02); }
+.print-row.current { border-color: color-mix(in srgb, var(--accent) 55%, transparent); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.print-go { flex: 1; min-width: 0; display: grid; grid-template-columns: 12px 1fr; gap: 4px 10px; align-items: center; padding: 10px 4px 10px 12px; text-align: left; background: none; border: 0; color: inherit; cursor: pointer; font: inherit; }
+.print-row.current .print-go { cursor: default; }
+.print-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); box-shadow: inset 0 0 0 1px rgba(255,255,255,.25); }
+.print-title { font-weight: 600; font-size: 15px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.print-title small { font-weight: 500; color: var(--accent); margin-left: 6px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+.print-sub { grid-column: 2; font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.print-bar { grid-column: 2; height: 3px; border-radius: 2px; background: rgba(255,255,255,.08); overflow: hidden; }
+.print-bar i { display: block; height: 100%; background: var(--accent); }
+.print-act { display: grid; place-items: center; width: 40px; background: none; border: 0; color: var(--muted); cursor: pointer; border-radius: 12px; }
+.print-act:hover { color: var(--text); background: rgba(255,255,255,.05); }
+.prints-add { width: 100%; }
+.prints-split { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.prints-split.hidden { display: none; }
+@media (hover: none) { .print-act.newtab { display: none; } }
+
+/* a pane of the split view: the outer page shows the brand */
+body.embed .brand { display: none; }
+body.embed .topbar { justify-content: flex-end; }
+
+/* split view (laptops): 2 or 3 prints side by side, each pane a full printsim page */
+body.split-mode > :not(.split-bar):not(.split-grid) { display: none !important; }
+.split-bar {
+  position: fixed; top: 0; left: 0; right: 0; height: 44px; z-index: 5;
+  display: flex; align-items: center; gap: 10px; padding: 0 14px;
+  border-bottom: 1px solid var(--line-2); background: var(--panel-solid);
+}
+.split-bar .brand { margin-right: auto; font-size: 15px; }
+.split-bar .brand span { color: var(--muted); font-weight: 500; font-family: var(--body, inherit); font-size: 13px; margin-left: 6px; }
+.split-grid { position: fixed; top: 44px; left: 0; right: 0; bottom: 0; display: grid; gap: 1px; background: var(--line-2); }
+.split-grid iframe { width: 100%; height: 100%; border: 0; display: block; background: #0f1114; }
+
 /* ---------- landing ---------- */
 .landing {
   position: fixed; inset: 0;

@@ -9,6 +9,7 @@ import { buildTimeline, stateAt, timeForPercent, tempsAt, remainingAt, MINI_STAT
 import { PRINTERS, probeRun } from '../js/printers.js';
 import { simulatePhysics } from '../js/physics.js';
 import { detectMaterial, nozzleTemp } from '../js/materials.js';
+import * as slots from '../js/slots.js';
 
 const dir = process.argv[2];
 if (!dir) { console.error('usage: node test/ci-check.mjs <libbgcode tests/data>'); process.exit(2); }
@@ -386,6 +387,37 @@ for (const f of [`${here}samples/twisted-vase.gcode`, `${here}test/bridge.gcode`
   check('prelude: remainingAt doubles at 50% speed', remainingAt(half, 0) === 174);
   const noR = buildTimeline({ ...parsed, anchors: parsed.anchors.map(a => ({ ...a, r: NaN })) }, printer, {});
   check('prelude: no R marks falls back to (total - t) / 60', Math.abs(remainingAt(noR, 0) - noR.total / 60) < 1e-6 && remainingAt(noR, noR.total) === 0);
+}
+
+// ---- several prints on one device (js/slots.js) ----
+{
+  const S = slots;
+  check('slots: print 1 keeps the original storage keys (old sessions still load)', S.fileKey('1') === 'file' && S.sessionKey('1') === 'session' && S.fileKey('2') === 'file:2' && S.sessionKey('3') === 'session:3');
+  check('slots: ?print=N, default and junk fall back to 1', S.currentId('?print=3') === '3' && S.currentId('') === '1' && S.currentId('?print=0') === '1' && S.currentId('?print=abc') === '1' && S.currentId('?print=100') === '1');
+  check('slots: next free id fills gaps', S.nextId(['1', '2', '4']) === '3' && S.nextId([]) === '1' && S.nextId(['2']) === '1');
+  check('slots: URLs', S.printUrl('1', { base: '/p/' }) === '/p/' && S.printUrl('2', { base: '/p/' }) === '/p/?print=2' && S.printUrl('1', { base: '/p/', embed: true }) === '/p/?print=1&embed=1' && S.splitUrl(['1', '3'], '/p/') === '/p/?split=1,3');
+  const sp = S.parseSplit('?split=2,2,x,5,6,7');
+  check('slots: split keeps 2 or 3 distinct valid ids', JSON.stringify(sp) === '["2","5","6"]' && JSON.stringify(S.parseSplit('?split=4')) === '["4","1"]' && S.parseSplit('?print=2') === null, JSON.stringify(sp));
+  check('slots: split puts this print first, then the others, then new slots', JSON.stringify(S.splitIds('2', ['1', '2', '5'], 3)) === '["2","1","5"]' && JSON.stringify(S.splitIds('1', ['1'], 3)) === '["1","2","3"]');
+  // registry with an in-memory store
+  const mem = {}; const get = (k, f) => (k in mem ? JSON.parse(mem[k]) : f); const put = (k, v) => { mem[k] = JSON.stringify(v); };
+  S.putPrint({ id: '2', mode: 'setup', file: 'b.bgcode' }, get, put);
+  S.putPrint({ id: '1', mode: 'run', file: 'a.bgcode' }, get, put);
+  S.putPrint({ id: '2', mode: 'done', file: 'b.bgcode' }, get, put);
+  const ls = S.listPrints(get);
+  check('slots: registry replaces by id and stays sorted', ls.length === 2 && ls[0].id === '1' && ls[1].mode === 'done');
+  S.dropPrint('1', get, put);
+  check('slots: dropping a print removes only it', S.listPrints(get).map((p) => p.id).join() === '2');
+  // live status from a summary, no file loaded
+  const t0 = 1_000_000;
+  const run = { running: true, anchorWall: t0, anchorSim: 600 };
+  const e = S.summary({ id: '2', mode: 'run', fileName: 'x.bgcode', unitName: 'MINI 3', color: '#fff', run, total: 3600 });
+  const st = S.statusOf(e, t0 + 600e3);
+  check('slots: running print status counts on from its anchors', st.state === 'run' && Math.abs(st.left - 2400) < 1e-6 && Math.abs(st.frac - 1 / 3) < 1e-9 && st.eta === t0 + 600e3 + 2400e3, JSON.stringify(st));
+  const ps = S.statusOf(S.summary({ id: '2', mode: 'run', fileName: 'x', run: { ...run, running: false }, total: 3600 }), t0 + 5e6);
+  check('slots: paused print stays put', ps.state === 'paused' && ps.left === 3000 && ps.eta === null);
+  check('slots: past its end says so', S.statusOf(e, t0 + 4000e3).state === 'over');
+  check('slots: label is the printer name, else Print N', S.labelOf(e, '2') === 'MINI 3' && S.labelOf({}, '4') === 'Print 4' && S.statusOf({ id: '3' }).state === 'empty');
 }
 
 console.log(failures ? `\n${failures} check(s) failed` : '\nall checks passed');

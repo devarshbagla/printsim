@@ -26,7 +26,13 @@
 
   <header class="topbar">
     <div class="brand"><img src="icons/icon.svg" alt="" width="22" height="22">printsim</div>
-    <button id="btn-new" class="chip hidden" type="button">New file</button>
+    <div class="top-actions">
+      <button id="btn-prints" class="chip prints-chip hidden" type="button" aria-haspopup="dialog" aria-label="Switch print">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="7" width="13" height="13" rx="2.5"/><path d="M8 4h10.5A2.5 2.5 0 0 1 21 6.5V17"/></svg>
+        <span id="prints-label">Print 1</span><span id="prints-count" class="prints-count hidden"></span>
+      </button>
+      <button id="btn-new" class="chip hidden" type="button">New file</button>
+    </div>
   </header>
 
   <!-- Empty state -->
@@ -284,6 +290,25 @@
       <div class="actions">
         <button value="cancel" class="btn" type="submit" formnovalidate>Cancel</button>
         <button value="ok" class="btn primary" type="submit">Add</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-prints" class="prints-dlg" aria-labelledby="prints-h">
+    <form method="dialog">
+      <div class="prints-head">
+        <h3 id="prints-h">Your prints</h3>
+        <button value="cancel" class="btn icon" type="submit" aria-label="Close">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>
+        </button>
+      </div>
+      <p class="muted small">Running more than one printer? Each print gets its own page, so you can follow them all from here.</p>
+      <div id="prints-list" class="prints-list" role="list"></div>
+      <button id="btn-print-add" class="btn prints-add" type="button">+ Track another print</button>
+      <div id="prints-split" class="prints-split hidden">
+        <span class="muted small">Side by side</span>
+        <button class="pill" type="button" data-split="2">2 prints</button>
+        <button class="pill" type="button" data-split="3">3 prints</button>
       </div>
     </form>
   </dialog>
